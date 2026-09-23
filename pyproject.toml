@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slidetwin"
+version = "0.3.2"
+description = "Docling-powered, context-aware slide translation with deterministic PDF typesetting"
+requires-python = ">=3.11"
+dependencies = [
+  "docling==2.123.1", "PyMuPDF==1.28.2", "httpx>=0.28,<0.29",
+  "python-dotenv>=1,<2", "Pillow>=11,<13", "numpy>=1.26,<3", "filelock>=3.16,<5",
+  "opencv-python>=4.11,<6", "rapidocr==3.9.2", "tokenizers>=0.21,<0.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+slidetwin = "slidetwin.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: sends course content to a configured model endpoint (opt-in)"]

@@ -1,0 +1,59 @@
+# Verified model limits: https://www.siliconflow.com/models/qwen3-vl-30b-a3b-instruct
+# API quota is account/model specific. 0 means UNKNOWN / no local quota cap.
+# Set RPM and TPM to the actual console limits; do not enter 80%-scaled TPM here.
+[provider]
+base_url = "https://api.siliconflow.cn/v1"
+model = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+fallback_models = ["Qwen/Qwen3-VL-32B-Instruct"]
+api_key_file = "apikey.txt"
+api_key_env = "SLIDETWIN_API_KEY"
+vision = true
+protocol = "auto"
+stream = true
+temperature = 0.1
+retries = 3
+primary_attempts = 2
+retry_base_delay_seconds = 1
+retry_max_delay_seconds = 15
+read_timeout_seconds = 120
+connect_timeout_seconds = 10
+request_deadline_seconds = 1800
+fallback_cooldown_seconds = 120
+rate_limit_backoff_seconds = 60
+# 0: auto concurrency up to RPM; until quota is known, bootstrap with 8 slots.
+concurrency = 0
+requests_per_minute = 0
+tokens_per_minute = 0
+rate_limit_source = "unknown-account-quota"
+token_rate_utilization = 0.8
+context_window_tokens = 262144
+context_utilization = 0.8
+model_max_output_tokens = 262144
+# Operational output cap verified accepted by this endpoint (actual requests sized dynamically).
+max_output_tokens = 131072
+token_parameter = "max_tokens"
+tokenizer_file = "" # Optional official tokenizer file; empty uses conservative estimates
+allowed_models = [] # Empty permits any explicitly configured model; set an explicit allowlist to restrict provider usage.
+
+[translation]
+target_language = "Simplified Chinese"
+batch_mode = "auto"
+context_mode = "adaptive"
+output_expansion_ratio = 1.5
+neighbor_pages = 2
+related_pages = 3
+glossary = true
+review = true
+max_context_characters = 0
+image_policy = "ocr_only"
+image_dpi = 120
+image_neighbors = 0
+preserve_terms = [] # Add terms that should remain unchanged
+
+[layout]
+font_regular = ""
+font_bold = ""
+min_font_scale = 0.75
+line_height = 1.12
+render_dpi = 110
+strict = true
