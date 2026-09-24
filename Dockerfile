@@ -1,5 +1,9 @@
 FROM python:3.12-slim-bookworm
 
+LABEL org.opencontainers.image.source="https://github.com/Alan1112223331/SlideTwin" \
+    org.opencontainers.image.licenses="AGPL-3.0-only" \
+    org.opencontainers.image.version="0.4.0"
+
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     HOME=/home/slidetwin XDG_CACHE_HOME=/models HF_HOME=/models/huggingface \
     SLIDETWIN_DATA_DIR=/data SLIDETWIN_CONFIG=/app/config.toml \
@@ -21,6 +25,7 @@ COPY requirements-docker.txt ./
 RUN python -c "import tomllib; p=tomllib.load(open('pyproject.toml','rb'))['project']; open('/tmp/requirements.txt','w').write('\n'.join(p['dependencies']+p['optional-dependencies']['server']))" \
     && pip install -c requirements-docker.txt -r /tmp/requirements.txt
 COPY src/slidetwin/ ./src/slidetwin/
+COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
 RUN pip install --no-deps .
 COPY docker-fonts.py /tmp/docker-fonts.py
 RUN pip install fonttools==4.66.0 && python /tmp/docker-fonts.py \

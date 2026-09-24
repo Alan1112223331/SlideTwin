@@ -174,7 +174,11 @@ def create_app(settings=None, runner=None):
         await manager.close()
 
     app = FastAPI(title='SlideTwin API', version=__version__, lifespan=lifespan,
-                  description='Asynchronous PDF translation and original Docling extraction. Bearer authentication required.')
+                  description='Asynchronous PDF translation and original Docling extraction. Bearer authentication required.',
+                  license_info={'name': 'AGPL-3.0-only',
+                                'url': 'https://github.com/Alan1112223331/SlideTwin/blob/main/LICENSE'},
+                  contact={'name': 'SlideTwin source code',
+                           'url': 'https://github.com/Alan1112223331/SlideTwin'})
     app.add_middleware(AccessAndSizeMiddleware, settings=settings)
     app.state.manager = manager
     router = APIRouter(prefix='/v1', dependencies=[Depends(HTTPBearer())])

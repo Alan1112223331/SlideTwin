@@ -6,12 +6,19 @@ build-backend = "setuptools.build_meta"
 name = "slidetwin"
 version = "0.4.0"
 description = "Docling-powered, context-aware slide translation with deterministic PDF typesetting"
+readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.11"
 dependencies = [
   "docling==2.123.1", "PyMuPDF==1.28.2", "httpx>=0.28,<0.29",
   "python-dotenv>=1,<2", "Pillow>=11,<13", "numpy>=1.26,<3", "filelock>=3.16,<5",
   "opencv-python>=4.11,<6", "rapidocr==3.9.2", "tokenizers>=0.21,<0.24",
 ]
+
+[project.urls]
+Repository = "https://github.com/Alan1112223331/SlideTwin"
+Issues = "https://github.com/Alan1112223331/SlideTwin/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]

@@ -5,6 +5,9 @@
 !docker-fonts.py
 !.dockerignore
 !pyproject.toml
+!README.md
+!LICENSE
+!THIRD_PARTY_NOTICES.md
 !requirements-docker.txt
 !config.example.toml
 !src/

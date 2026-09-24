@@ -2,7 +2,7 @@
 
 基于 Docling 和 OpenAI 兼容 Chat Completions 接口的课件 PDF 翻译程序，当前版本 **0.4.0**。支持中文译稿、中英对照 PDF 和 Docling 原始提取结果；当前支持 PDF，原生 PPTX 编辑尚未实现。
 
-本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。GitHub 首次发布标签 `release0.1` 保留程序 0.3.2 的快照。
+本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。当前 GitHub 发布标签为 [`release0.1.1`](https://github.com/Alan1112223331/SlideTwin/releases/tag/release0.1.1)，对应程序 0.4.0；首次发布标签 `release0.1` 保留程序 0.3.2 的快照。
 
 ## Docker 与 HTTP API
 
@@ -188,3 +188,11 @@ Python 3.11+。Docling 初次运行下载解析/OCR 模型，之后复用缓存�
 仓库只收录程序、合成测试、示例配置和脱敏文档。API Key、本地配置、环境、课件、输出 PDF、页面图片、模型响应、日志、缓存和个人测试脚本均不随发布上传。测试使用的姓名和课程编号是虚构示例。
 
 `scripts/refresh_verified_output.py` 和 `scripts/finish_async_four_courses.py` 是旧批次维护工具，仅为保留回归测试及兼容本地记录而收录，依赖使用者自行提供的本地清单；新文件请使用上面的 `slidetwin translate` 命令。
+
+## 开源许可
+
+Copyright (C) 2026 SlideTwin contributors.
+
+SlideTwin 原创代码按 **GNU Affero General Public License v3.0 only（AGPL-3.0-only）** 发布，完整条款见 [LICENSE](LICENSE)。本程序不提供担保。第三方组件继续适用各自许可证，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+公开源码位于 [GitHub 仓库](https://github.com/Alan1112223331/SlideTwin)。部署修改后的网络服务时，应向用户提供对应版本的完整源码；再分发时保留许可及版权声明，具体义务以许可证全文为准。
