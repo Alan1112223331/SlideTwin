@@ -1,0 +1,30 @@
+services:
+  slidetwin:
+    build: .
+    image: slidetwin:0.4.0
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${SLIDETWIN_BIND_ADDRESS:-127.0.0.1}:${SLIDETWIN_PORT:-8000}:8000"
+    environment:
+      SLIDETWIN_API_TOKEN: ${SLIDETWIN_API_TOKEN:?Set a random API access token in .env}
+      SLIDETWIN_API_KEY: ${SLIDETWIN_API_KEY:-}
+      SLIDETWIN_JOB_WORKERS: ${SLIDETWIN_JOB_WORKERS:-1}
+      SLIDETWIN_MAX_PENDING: ${SLIDETWIN_MAX_PENDING:-16}
+      SLIDETWIN_MAX_UPLOAD_MB: ${SLIDETWIN_MAX_UPLOAD_MB:-100}
+      SLIDETWIN_MAX_PAGES: ${SLIDETWIN_MAX_PAGES:-500}
+      SLIDETWIN_JOB_TIMEOUT: ${SLIDETWIN_JOB_TIMEOUT:-7200}
+    volumes:
+      - slidetwin-data:/data
+      - slidetwin-models:/models
+      - ${SLIDETWIN_CONFIG_FILE:-./config.example.toml}:/app/config.toml:ro
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  slidetwin-data:
+    name: ${SLIDETWIN_DATA_VOLUME:-slidetwin-service-data}
+  slidetwin-models:
+    name: ${SLIDETWIN_MODELS_VOLUME:-slidetwin-service-models}

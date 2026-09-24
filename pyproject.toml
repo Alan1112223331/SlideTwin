@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidetwin"
-version = "0.3.2"
+version = "0.4.0"
 description = "Docling-powered, context-aware slide translation with deterministic PDF typesetting"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,9 +15,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+server = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "python-multipart>=0.0.20,<1"]
 
 [project.scripts]
 slidetwin = "slidetwin.cli:main"
+slidetwin-server = "slidetwin.api:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

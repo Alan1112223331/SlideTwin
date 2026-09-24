@@ -1,8 +1,14 @@
 # SlideTwin
 
-基于 Docling 和 OpenAI 兼容 Chat Completions 接口的课件 PDF 翻译程序，当前版本 **0.3.2**。输出顺序为「原页 → 译文页」，保留原始图形、字体层级、颜色和列表坐标。当前支持 PDF，原生 PPTX 编辑尚未实现。
+基于 Docling 和 OpenAI 兼容 Chat Completions 接口的课件 PDF 翻译程序，当前版本 **0.4.0**。支持中文译稿、中英对照 PDF 和 Docling 原始提取结果；当前支持 PDF，原生 PPTX 编辑尚未实现。
 
-本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。GitHub 首次发布标签为 `release0.1`，对应当前程序版本 0.3.2。
+本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。GitHub 首次发布标签 `release0.1` 保留程序 0.3.2 的快照。
+
+## Docker 与 HTTP API
+
+部署和调用方式见 [DOCKER.md](DOCKER.md)。准备本地 `.env` 的服务访问令牌和模型密钥后运行 `docker compose up -d --build`，在 `/docs` 查看交互接口。
+
+上传 PDF 到 `POST /v1/jobs`，随后查询任务并下载 `chinese`、`bilingual` 或 `docling` 结果。中文和中英各提供 PDF / JSON / Markdown，Docling 提供原版 JSON / Markdown。仅提取 Docling 不需要翻译 API Key。
 
 ## 运行
 

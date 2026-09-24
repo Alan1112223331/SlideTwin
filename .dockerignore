@@ -1,0 +1,14 @@
+# Deny by default: no local credentials, course files or history enter the build context.
+**
+!Dockerfile
+!docker-entrypoint.sh
+!docker-fonts.py
+!.dockerignore
+!pyproject.toml
+!requirements-docker.txt
+!config.example.toml
+!src/
+src/**
+!src/slidetwin/
+src/slidetwin/**
+!src/slidetwin/*.py

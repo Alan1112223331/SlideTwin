@@ -37,5 +37,6 @@ output/
 # Only reviewed, reusable helper scripts belong in this repository.
 /scripts/*
 !/scripts/configure_local.py
+!/scripts/api_client.py
 !/scripts/refresh_verified_output.py
 !/scripts/finish_async_four_courses.py

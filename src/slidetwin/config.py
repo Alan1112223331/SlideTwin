@@ -103,6 +103,7 @@ class Layout:
         pairs = [
             (self.font_regular, self.font_bold or self.font_regular),
             ("C:/Windows/Fonts/Deng.ttf", "C:/Windows/Fonts/Dengb.ttf"),
+            ("/usr/share/fonts/truetype/slidetwin/NotoSansSC-Regular.ttf", "/usr/share/fonts/truetype/slidetwin/NotoSansSC-Bold.ttf"),
             ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
             ("/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/PingFang.ttc"),
         ]
