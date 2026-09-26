@@ -1,9 +1,9 @@
 services:
   slidetwin:
     build: .
-    image: slidetwin:0.4.0
+    image: slidetwin:0.4.1
     init: true
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "${SLIDETWIN_BIND_ADDRESS:-127.0.0.1}:${SLIDETWIN_PORT:-8000}:8000"
     environment:

@@ -1,6 +1,6 @@
 # Docker 部署与 HTTP API
 
-本服务接收 PDF，异步生成中文、中英对照和 Docling 原始提取结果。镜像使用 Linux CPU、Python 3.12，自带中文字体和 Poppler；无需在宿主机安装 Docling。当前镜像标签为 `slidetwin:0.4.0`，通过本项目 Dockerfile 本地构建。
+本服务接收 PDF，异步生成中文、中英对照和 Docling 原始提取结果。镜像使用 Linux CPU、Python 3.12，自带中文字体和 Poppler；无需在宿主机安装 Docling。当前镜像标签为 `slidetwin:0.4.1`，通过本项目 Dockerfile 本地构建。
 
 ## 启动
 
@@ -8,12 +8,20 @@
 2. 在 `.env` 设置 `SLIDETWIN_API_TOKEN`，至少 16 个字符，建议随机生成。它用于调用本服务，与模型 API Key 不同。
 3. 如需翻译，设置 `SLIDETWIN_API_KEY` 为模型服务密钥。仅提取 Docling 时可留空。
 4. 将 `config.example.toml` 复制为 `config.local.toml`，按模型服务填写模型、上下文限制、RPM / TPM。在 `.env` 增加 `SLIDETWIN_CONFIG_FILE=./config.local.toml`。本机 Windows 字体、tokenizer 或密钥路径不能直接供 Linux 容器使用，未另行挂载时将相应路径留空，使用容器字体与环境变量密钥。
-5. 运行：
+5. 先构建镜像（不会启动服务）：
 
 ```powershell
-docker compose up -d --build
+docker compose build
+```
+
+需要使用服务时手动启动：
+
+```powershell
+docker compose up -d --no-build
 docker compose ps
 ```
+
+容器配置为不自动重启。关闭 Docker Desktop 后再次打开，SlideTwin 不会随之启动；使用完可运行 `docker compose stop`。重建现有服务时，请先停止正在运行的容器，再执行 `docker compose build` 和 `docker compose up -d --no-build`。
 
 默认地址 `http://127.0.0.1:8000`，交互接口文档 `http://127.0.0.1:8000/docs`。点击 Authorize 输入本服务的 API Token 后调用任务接口。`/healthz` 和接口说明不需要鉴权，其余接口需要 `Authorization: Bearer <token>`。
 

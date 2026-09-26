@@ -2,7 +2,7 @@ FROM python:3.12-slim-bookworm
 
 LABEL org.opencontainers.image.source="https://github.com/Alan1112223331/SlideTwin" \
     org.opencontainers.image.licenses="AGPL-3.0-only" \
-    org.opencontainers.image.version="0.4.0"
+    org.opencontainers.image.version="0.4.1"
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     HOME=/home/slidetwin XDG_CACHE_HOME=/models HF_HOME=/models/huggingface \

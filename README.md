@@ -1,12 +1,12 @@
 # SlideTwin
 
-基于 Docling 和 OpenAI 兼容 Chat Completions 接口的课件 PDF 翻译程序，当前版本 **0.4.0**。支持中文译稿、中英对照 PDF 和 Docling 原始提取结果；当前支持 PDF，原生 PPTX 编辑尚未实现。
+基于 Docling 和 OpenAI 兼容 Chat Completions 接口的课件 PDF 翻译程序，当前版本 **0.4.1**。支持中文译稿、中英对照 PDF 和 Docling 原始提取结果；当前支持 PDF，原生 PPTX 编辑尚未实现。
 
-本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。当前 GitHub 发布标签为 [`release0.1.1`](https://github.com/Alan1112223331/SlideTwin/releases/tag/release0.1.1)，对应程序 0.4.0；首次发布标签 `release0.1` 保留程序 0.3.2 的快照。
+本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。当前 GitHub 发布标签为 [`release0.1.2`](https://github.com/Alan1112223331/SlideTwin/releases/tag/release0.1.2)，对应程序 0.4.1；`release0.1.1` 对应程序 0.4.0，首次发布标签 `release0.1` 保留程序 0.3.2 的快照。
 
 ## Docker 与 HTTP API
 
-部署和调用方式见 [DOCKER.md](DOCKER.md)。准备本地 `.env` 的服务访问令牌和模型密钥后运行 `docker compose up -d --build`，在 `/docs` 查看交互接口。
+部署和调用方式见 [DOCKER.md](DOCKER.md)。准备本地 `.env` 的服务访问令牌和模型密钥后，使用 `docker compose build` 构建镜像；需要服务时手动运行 `docker compose up -d --no-build`，在 `/docs` 查看交互接口。容器不会随 Docker Desktop 自动启动。
 
 上传 PDF 到 `POST /v1/jobs`，随后查询任务并下载 `chinese`、`bilingual` 或 `docling` 结果。中文和中英各提供 PDF / JSON / Markdown，Docling 提供原版 JSON / Markdown。仅提取 Docling 不需要翻译 API Key。
 

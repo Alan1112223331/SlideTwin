@@ -1,9 +1,11 @@
 # 发布记录
 
-## 未发布
+## release0.1.2（程序 0.4.1）
 
+- Docker Compose 默认不自动重启容器；构建与手动启动分开。
 - 成品 PDF 取消页底排版诊断及溢出补充区域，保留原页面尺寸和成功放置的译文。
 - 未放置译文与问题信息保存在独立 `.issues.json`；Docker API 的 `report.json` 同时提供 `page_issues`，不隐藏警告状态。
+- 程序与本地镜像版本更新为 0.4.1；`release0.1.1` 和 `release0.1` 保留原样。
 
 ## release0.1.1（程序 0.4.0，Docker/API）
 
