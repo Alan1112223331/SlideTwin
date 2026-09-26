@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
-from html import escape
 import os
 import re
 import shutil
@@ -14,7 +13,7 @@ import pymupdf as fitz
 from .extract import restore
 from .models import digest, read_cache, write_json
 from .qa import render_previews, verify
-from .render import LayoutError, Placement, build_plan, render, css_fonts
+from .render import LayoutError, Placement, build_plan, render
 
 
 def retained_values(work, document, config):
@@ -59,7 +58,7 @@ def render_local(source,document,values,number,layout,local,preflight=None):
         if region.native and region.erase:
             plans.append(erase_only(region));cleared.add(key)
         else:
-            issues.append({'id':key,'kind':'source_pixels_retained','reason':'No safe local erase geometry; translation is in the note below'})
+            issues.append({'id':key,'kind':'source_pixels_retained','reason':'No safe local erase geometry; translation is retained in the accompanying issues report'})
     rendered=local/'rendered.pdf'
     while True:
         try:
@@ -80,32 +79,6 @@ def render_local(source,document,values,number,layout,local,preflight=None):
     return rendered,failed,issues
 
 
-def append_local_notes(result,translated,page,failed,values,layout,extraction_failed=False):
-    """Keep the slide at its original scale; put only overflow blocks below it."""
-    css,archive=css_fonts(layout.fonts())
-    paragraphs=[]
-    if extraction_failed:
-        paragraphs.append('<p>该页文字提取未完成，未取得可放置的译文。已保留原页图形，详情见 issues.json。</p>')
-    for region in page.regions:
-        if region.id not in failed:continue
-        x,y=round(region.bbox[0]),round(region.bbox[1])
-        paragraphs.append(f'<p><span style="color:#775521">{escape(region.id)}（原位置 {x}, {y}）</span><br>{escape(restore(region,values[region.id]))}</p>')
-    body='<div style="font-family:twin,latin,unicode,extended,symbols;font-size:11pt;line-height:1.3"><b>局部排版待检查：以下译文超出原文字区域，原页图形和其它译文已保留。</b>'+''.join(paragraphs)+'</div>'
-    width=max(page.width,320)
-    height=120
-    while True:
-        with fitz.open() as probe:
-            p=probe.new_page(width=width,height=height)
-            spare,_=p.insert_htmlbox(fitz.Rect(16,10,width-16,height-10),body,css=css,archive=archive,scale_low=1)
-        if spare>=0:break
-        height*=1.5
-    # Failed measurement attempts never touch completed output pages.
-    target=result.new_page(width=width,height=page.height+height)
-    target.show_pdf_page(fitz.Rect(0,0,page.width,page.height),translated,1)
-    target.draw_rect(fitz.Rect(0,page.height,width,page.height+height),color=None,fill=(1,.98,.92))
-    target.insert_htmlbox(fitz.Rect(16,page.height+10,width-16,page.height+height-10),body,css=css,archive=archive,scale_low=1)
-
-
 def publish_best_effort(source, output, work, document, selected, config, reason, values=None, preview=True, log=print,preflight=None):
     """Atomically publish every selected page; never claim warning-free QA."""
     if digest(source.read_bytes())!=document.source_sha256:
@@ -115,7 +88,7 @@ def publish_best_effort(source, output, work, document, selected, config, reason
     doc=deepcopy(document)
     report={'status':'completed_with_warnings','reason':str(reason),'source_sha256':document.source_sha256,
             'config_fingerprint':config.fingerprint(),'selected_pages':selected,'pages':[],
-            'fully_validated':False,'visual_review':'pending_human_review'}
+            'fully_validated':False,'visual_review':'pending_human_review','diagnostics_location':'issues_report'}
     ledger=read_cache(work/'translation-ledger.json')
     if ledger.get('source_sha256')==document.source_sha256 and ledger.get('config_fingerprint')==config.fingerprint():
         report['translation_failures']=ledger.get('failures',[])
@@ -132,13 +105,17 @@ def publish_best_effort(source, output, work, document, selected, config, reason
             result.insert_pdf(original,from_page=number-1,to_page=number-1)
             rendered,failed,issues=render_local(source,doc,values,number,config.layout,local,preflight)
             extraction_failed=not page.regions and any(i.get('blocking') for i in issues)
-            mode='local_overflow_notes' if failed or extraction_failed else 'source_layout'
             with fitz.open(rendered) as translated:
-                if failed or extraction_failed:append_local_notes(result,translated,page,failed,values,config.layout,extraction_failed)
-                else:result.insert_pdf(translated,from_page=1,to_page=1)
-            report['pages'].append({'source_page':number,'layout':mode,'missing_targets':missing,
-                                    'overflow_targets':sorted(failed),'issues':issues})
-        result.set_metadata({'title':source.stem+' - SlideTwin 待检查译稿','subject':'Retained model translations; see accompanying issues report','producer':'SlideTwin'})
+                # Production slides keep their source geometry. Diagnostics and
+                # unplaced model text belong in the sidecar, never on the slide.
+                result.insert_pdf(translated,from_page=1,to_page=1)
+            unplaced=[{'id':r.id,'bbox':r.bbox,
+                       'translation':restore(r,values[r.id]) if r.id not in missing else None}
+                      for r in page.regions if r.id in failed]
+            report['pages'].append({'source_page':number,'layout':'source_layout','missing_targets':missing,
+                                    'overflow_targets':sorted(failed),'unplaced_translations':unplaced,
+                                    'extraction_failed':extraction_failed,'issues':issues})
+        result.set_metadata({'title':source.stem+' - SlideTwin','producer':'SlideTwin'})
         result.subset_fonts();result.save(candidate,garbage=4,deflate=True)
     with fitz.open(candidate) as check:
         if len(check)!=2*len(selected):raise RuntimeError('Best-effort export page count mismatch')
@@ -160,5 +137,5 @@ def publish_best_effort(source, output, work, document, selected, config, reason
         try:report['preview']=render_previews(output,root,selected,config.layout.render_dpi)
         except (RuntimeError,OSError,subprocess.SubprocessError) as exc:report['preview_error']=str(exc)
     write_json(work/'run.json',report);write_json(output.with_suffix('.issues.json'),report)
-    log(f'Created {output} ({len(selected)*2} pages, WITH WARNINGS). Model text was retained; see {output.with_suffix(".issues.json")}')
+    log(f'Created {output} ({len(selected)*2} pages, WITH WARNINGS). Diagnostics and unplaced model text: {output.with_suffix(".issues.json")}')
     return report

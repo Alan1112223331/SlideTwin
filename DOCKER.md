@@ -60,6 +60,8 @@ curl.exe -H "Authorization: Bearer $env:SLIDETWIN_API_TOKEN" `
 
 中文和中英两份 PDF 共用一次翻译，中文版本直接选取中英 PDF 中的译文页，不再次调用模型或重新排版。术语、公式、变量和无法翻译的图像内文字可能仍保留原样；中文模式表示只含译文页面，不保证每个字形都是中文。
 
+成品 PDF 始终保持原页面尺寸，不附加排版诊断框、内部编号或页底补充区域。无法放置的译文保存在 `report.json` 的 `page_issues[].unplaced_translations`（含页码对应信息、块 ID、原位置和完整译文），并继续出现在中文 / 中英 JSON 与 Markdown 中；任务仍报告 `completed_with_warnings`，不会把未放置的内容当作已完成排版。
+
 `chinese.json` / `bilingual.json` 使用 `slidetwin.translation.v1` schema，包含源页码、页面尺寸、块 ID、坐标、角色和译文；后者额外包含原文。它们是 SlideTwin 的结果格式。`docling.json` 才是未经 SlideTwin 改写的 Docling schema。Markdown 用于读取和下游处理，不承诺还原 PDF 布局。
 
 如指定 `pages=1,3-5`，PDF 和文本结果仅输出这些页；Docling 对象树中的页号按所选子文档从 1 开始，原页对应关系见任务的 `selected_pages`。JSON 中原始输入名称统一为服务内部名称，不保留客户端文件路径。

@@ -1,5 +1,10 @@
 # 发布记录
 
+## 未发布
+
+- 成品 PDF 取消页底排版诊断及溢出补充区域，保留原页面尺寸和成功放置的译文。
+- 未放置译文与问题信息保存在独立 `.issues.json`；Docker API 的 `report.json` 同时提供 `page_issues`，不隐藏警告状态。
+
 ## release0.1.1（程序 0.4.0，Docker/API）
 
 GitHub 发布标签为 `release0.1.1`，Python 包及本地 Docker 镜像版本保持 `0.4.0`。

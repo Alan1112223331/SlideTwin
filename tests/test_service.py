@@ -224,3 +224,37 @@ def test_text_export_uses_retained_translations_and_preserves_source_pair(tmp_pa
     assert cn[1]['translation'] is None and cn[1]['status'] == 'missing'
     assert both[0]['source'] == 'Voltage 6' and both[0]['translation'] == '电压 6'
     assert '未取得译文' in (out / 'chinese.md').read_text(encoding='utf8')
+
+
+def test_unplaced_text_is_available_in_api_report_without_internal_paths(tmp_path, monkeypatch):
+    from slidetwin.config import Settings
+    import slidetwin.worker as worker
+    job=make_job(tmp_path,['chinese','bilingual']);config=Settings()
+    text='模型返回的完整译文，保留在独立报告中。'
+    def translated(source,output,work,*args,**kwargs):
+        document=Document('source-hash',[
+            Page(1,612,792,[Region('a',1,'Source text',[30,40,100,60])]),
+            Page(2,612,792,[]),
+        ])
+        document.save(work/'document.json')
+        write_json(work/'translation-ledger.json',{'source_sha256':'source-hash',
+                   'config_fingerprint':config.fingerprint(),'translations':{'a':text}})
+        output.write_bytes(pdf_bytes(4))
+        return {'status':'completed_with_warnings','previous_output_backup':'/private/internal.pdf',
+                'pages':[{'source_page':1,'missing_targets':[],'overflow_targets':['a'],
+                          'issues':[{'reason':'/private/trace.log'}],
+                          'unplaced_translations':[{'id':'a','bbox':[30,40,100,60],
+                                                   'translation':text,'private_path':'/private/debug.json'}]}]}
+    monkeypatch.setattr(worker,'convert_docling',extraction)
+    monkeypatch.setattr(worker,'_load_config',lambda:config)
+    monkeypatch.setattr(worker,'run',translated)
+    result=run_job(job)
+    assert result['status']=='completed_with_warnings'
+    assert result['outputs']=={'chinese':'ready','bilingual':'ready'}
+    assert result['page_issues']==[{'source_page':1,'missing_targets':[],'overflow_targets':['a'],
+                                  'extraction_failed':False,'unplaced_translations':[
+                                      {'id':'a','bbox':[30,40,100,60],'translation':text}]}]
+    report=read_cache(job/'artifacts/report.json')
+    assert report==result and '/private/' not in json.dumps(report)
+    assert read_cache(job/'artifacts/chinese.json')['pages'][0]['blocks'][0]['translation']==text
+    assert text in (job/'artifacts/bilingual.md').read_text(encoding='utf8')

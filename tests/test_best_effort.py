@@ -30,21 +30,54 @@ def test_export_keeps_rejected_translation_and_replaces_output_with_backup(tmp_p
         assert len(pdf)==2
         assert '6' in pdf[1].get_text() and 'Voltage 5' not in pdf[1].get_text()
         assert pdf[1].rect==fitz.Rect(0,0,400,250)
-        assert '待检查译稿' in pdf.metadata['title']
+        assert pdf.metadata['title']=='source - SlideTwin'
     assert report['fully_validated'] is False
     assert Path(report['previous_output_backup']).read_bytes()==b'previous-output'
     assert source.read_bytes()==before
 
 
-def test_failed_layout_still_exports_model_text_in_readable_page(tmp_path,monkeypatch):
+def test_failed_layout_keeps_slide_size_and_retains_model_text_in_sidecar(tmp_path,monkeypatch):
     import slidetwin.best_effort as module
     source,doc=sample(tmp_path);cfg=Settings();work=tmp_path/'work';work.mkdir()
     monkeypatch.setattr(module,'build_plan',lambda *a,**k:([],[{'page':1,'id':'a','kind':'layout_blocked'}]))
     out=tmp_path/'out.pdf'
-    report=publish_best_effort(source,out,work,doc,[1],cfg,'layout failure',{'a':'电压为 6'},preview=False)
-    assert report['pages'][0]['layout']=='local_overflow_notes'
+    text='电压为 6。'+('这是模型已经返回、必须完整保留的内容。'*100)
+    report=publish_best_effort(source,out,work,doc,[1],cfg,'layout failure',{'a':text},preview=False)
+    assert report['pages'][0]['layout']=='source_layout'
+    assert report['status']=='completed_with_warnings'
+    assert report['pages'][0]['unplaced_translations']==[{'id':'a','bbox':doc.pages[0].regions[0].bbox,'translation':text}]
+    assert json.loads(out.with_suffix('.issues.json').read_text(encoding='utf8'))==report
     with fitz.open(out) as pdf:
-        assert '6' in pdf[1].get_text() and 'Voltage 5' not in pdf[1].get_text()
+        assert len(pdf)==2
+        assert pdf[0].rect==pdf[1].rect==fitz.Rect(0,0,400,250)
+        assert 'Voltage 5' not in pdf[1].get_text()
+        assert all(value not in pdf[1].get_text() for value in ('局部排版待检查','原位置','这是模型'))
+
+
+def test_extraction_failure_never_adds_diagnostic_page_or_footer(tmp_path):
+    source,doc=sample(tmp_path);doc.pages[0].regions=[]
+    doc.diagnostics=[{'page':1,'kind':'page_enrichment_failed','blocking':True}]
+    out=tmp_path/'out.pdf'
+    report=publish_best_effort(source,out,tmp_path/'work',doc,[1],Settings(),'extraction failed',preview=False)
+    assert report['pages'][0]['extraction_failed']
+    with fitz.open(source) as original,fitz.open(out) as pdf:
+        assert len(pdf)==2
+        assert pdf[1].rect==original[0].rect
+        assert pdf[1].get_pixmap().samples==original[0].get_pixmap().samples
+        assert '提取未完成' not in pdf[1].get_text()
+
+
+def test_unsafe_ocr_overflow_retains_text_only_in_report(tmp_path,monkeypatch):
+    import slidetwin.best_effort as module
+    source,doc=sample(tmp_path);doc.pages[0].regions[0].native=False
+    monkeypatch.setattr(module,'build_plan',lambda *a,**k:([],[{'page':1,'id':'a','kind':'layout_blocked'}]))
+    out=tmp_path/'out.pdf'
+    report=publish_best_effort(source,out,tmp_path/'work',doc,[1],Settings(),'unsafe erase',{'a':'电压 ⟦P000⟧'},preview=False)
+    assert report['pages'][0]['unplaced_translations'][0]['translation']=='电压 5'
+    assert any(i['kind']=='source_pixels_retained' for i in report['pages'][0]['issues'])
+    with fitz.open(source) as original,fitz.open(out) as pdf:
+        assert pdf[1].rect==original[0].rect
+        assert pdf[1].get_pixmap().samples==original[0].get_pixmap().samples
 
 
 def test_pipeline_exports_after_retry_limit_without_hiding_unvalidated_text(tmp_path,monkeypatch):

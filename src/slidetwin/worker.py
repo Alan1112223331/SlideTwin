@@ -79,6 +79,7 @@ def run_job(job: Path, max_pages: int = 500):
     selected = []
     warnings = []
     errors = []
+    page_issues = []
     work = job / 'work'
     artifacts = job / 'artifacts'
     artifacts.mkdir(exist_ok=True)
@@ -119,6 +120,19 @@ def run_job(job: Path, max_pages: int = 500):
             result = run(source, output, work, config, pages=request.get('pages'), preview=False, log=progress)
             if result.get('status') != 'automated_checks_passed':
                 warnings.append('translation_or_layout_needs_review')
+            # Expose retained overflow text without publishing private paths,
+            # tracebacks or other internal fields from the CLI issues report.
+            for page in result.get('pages', []):
+                if page.get('overflow_targets') or page.get('missing_targets') or page.get('extraction_failed'):
+                    page_issues.append({
+                        'source_page': page['source_page'],
+                        'missing_targets': page.get('missing_targets', []),
+                        'overflow_targets': page.get('overflow_targets', []),
+                        'extraction_failed': page.get('extraction_failed', False),
+                        'unplaced_translations': [
+                            {key: block.get(key) for key in ('id', 'bbox', 'translation')}
+                            for block in page.get('unplaced_translations', [])],
+                    })
             update(job, stage='exporting')
             # Each product is isolated: a Markdown or Chinese-PDF export failure
             # cannot discard a successfully produced bilingual PDF or Docling tree.
@@ -144,6 +158,7 @@ def run_job(job: Path, max_pages: int = 500):
               for mode, names in expected.items()}
     status = ('completed_with_warnings' if errors or warnings or any(s != 'ready' for s in groups.values()) else 'completed') if available else 'failed'
     report = {'status': status, 'selected_pages': selected, 'outputs': groups, 'warnings': warnings, 'errors': errors,
+              'page_issues': page_issues,
               'visual_review': 'not_performed', 'note': 'Automatic completion does not certify visual or semantic perfection.'}
     write_json(artifacts / 'report.json', report)
     update(job, status=status, stage='finished', finished_at=now(), artifacts=collect_artifacts(job),

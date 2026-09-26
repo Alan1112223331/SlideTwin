@@ -221,10 +221,12 @@ def test_one_bad_placement_keeps_artwork_and_other_translations(tmp_path,monkeyp
         assert len(result)==2
         assert '正常标题' in result[1].get_text()
         assert 'Failing label' not in result[1].get_text()
-        assert values[bad].replace(' ','') in ''.join(result[1].get_text().split())
+        assert result[1].rect==src[0].rect
+        assert all(text not in result[1].get_text() for text in ('局部排版待检查','原位置',bad))
         clip=fitz.Rect(310,140,440,240)
         assert src[0].get_pixmap(clip=clip).samples==result[1].get_pixmap(clip=clip).samples
     assert report['pages'][0]['overflow_targets']==[bad]
+    assert report['pages'][0]['unplaced_translations'][0]['translation']==values[bad]
 
 
 def test_preview_failure_still_publishes_checked_pdf(tmp_path,monkeypatch):
@@ -324,7 +326,8 @@ def test_broken_native_enrichment_is_confined_to_one_page(tmp_path,monkeypatch):
     out=tmp_path/'out.pdf'
     report=publish_best_effort(source,out,work,doc,[1,2],Settings(),'extraction failure',{r.id:'正常页面译文' for r in doc.pages[1].regions},preview=False)
     with fitz.open(out) as pdf:
-        assert len(pdf)==4 and '该页文字提取未完成' in pdf[1].get_text()
+        assert len(pdf)==4 and '该页文字提取未完成' not in pdf[1].get_text()
+        assert pdf[0].rect==pdf[1].rect and pdf[2].rect==pdf[3].rect
         assert '正常页面译文' in pdf[3].get_text()
 
 
