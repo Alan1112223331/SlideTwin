@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libgl1 libglib2.0-0 libgomp1 fonts-noto-cjk poppler-utils \
+    ca-certificates libgl1 libglib2.0-0 libgomp1 fonts-noto-cjk fonts-dejavu-extra poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 slidetwin \
     && useradd --uid 10001 --gid 10001 --create-home slidetwin \
@@ -29,6 +29,7 @@ COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
 RUN pip install --no-deps .
 COPY docker-fonts.py /tmp/docker-fonts.py
 RUN pip install fonttools==4.66.0 && python /tmp/docker-fonts.py \
+    && test -f /usr/share/fonts/truetype/dejavu/DejaVuMathTeXGyre.ttf \
     && pip uninstall -y fonttools && rm /tmp/docker-fonts.py
 # RapidOCR defaults to a package-local download directory. Redirect it to the
 # writable, persistent model volume instead of making site-packages writable.

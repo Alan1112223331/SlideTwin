@@ -56,6 +56,15 @@ class Translator:
                 sources[f"{region.id}_s{i}"] = phrase["source"]
         return sources
 
+    def source_literals(self, page: Page) -> dict[str, str]:
+        """Source identities include the glyph text behind protected tokens."""
+        literals={}
+        for region in page.regions:
+            literals[region.id]=restore(region,region.source)
+            for i,phrase in enumerate(region.inline_styles):
+                literals[f"{region.id}_s{i}"]=restore(region,phrase["source"])
+        return literals
+
     def retain_candidate(self, page, sources, mode, text, draft=None):
         """Keep model text BEFORE validation; rejected text remains exportable."""
         path=self.work/'translation-candidates.json'
@@ -74,11 +83,13 @@ class Translator:
         for key,value in raw.items():
             if key not in sources or not isinstance(value,str) or not value.strip():continue
             value=strip_wrapper(value)
-            region=next((r for r in page.regions if r.id==key),None)
+            region_id=re.sub(r'(?:_s\d+|__part\d+)$','',key)
+            region=next((r for r in page.regions if r.id==region_id),None)
             if region and mode=='plain':
                 try:value=restore_plain_tokens(value,region.protected,region.source)
                 except ProtocolError:pass
-            state['targets'][key]={'text':value,'mode':mode,'stage':'review_or_repair' if draft is not None else 'translation','source':sources[key]}
+            state['targets'][key]={'text':value,'mode':mode,'stage':'review_or_repair' if draft is not None else 'translation',
+                                  'source':sources[key],'source_literal':restore(region,sources[key]) if region else sources[key]}
         write_json(path,state)
 
     def validate_meaning_coverage(self, sources: dict[str, str], values: dict[str, str]):
@@ -409,5 +420,7 @@ class Translator:
         write_json(self.work / "translation-events.json", self.events)
         write_json(self.work / "translation-ledger.json", {"source_sha256": self.document.source_sha256,
                    "config_fingerprint": self.config.fingerprint(), "selected_pages": selected,
-                   "translations": translations, "usage": self.client.usage})
+                   "translations": translations, "usage": self.client.usage,
+                   "target_sources":{key:value for page in self.document.pages for key,value in self.sources(page).items()},
+                   "target_source_literals":{key:value for page in self.document.pages for key,value in self.source_literals(page).items()}})
         return translations

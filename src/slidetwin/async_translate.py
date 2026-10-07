@@ -406,6 +406,26 @@ class AsyncTranslator(Translator):
 
     async def run_async(self,selected):
         self.resume_ledger=read_cache(self.work/'translation-ledger.json')
+        target_sources={key:value for page in self.document.pages for key,value in self.sources(page).items()}
+        target_source_literals={key:value for page in self.document.pages for key,value in self.source_literals(page).items()}
+        saved=self.resume_ledger
+        compatible=(saved.get('source_sha256')==self.document.source_sha256
+                    and saved.get('config_fingerprint')==self.config.fingerprint())
+        # Region IDs are positional and can change after a geometry refresh.
+        # Older accepted candidates without their original source cannot be
+        # restored by ID alone; successful pages still use their page keys.
+        accepted=saved.get('accepted_candidates',{})
+        previous_sources=saved.get('target_sources',{})
+        previous_literals=saved.get('target_source_literals',{})
+        if not isinstance(accepted,dict):accepted={}
+        if not isinstance(previous_sources,dict):previous_sources={}
+        if not isinstance(previous_literals,dict):previous_literals={}
+        self.accepted_candidates={key:value for key,value in accepted.items()
+                                  if compatible and key in target_sources
+                                  and previous_sources.get(key)==target_sources[key]
+                                  and (previous_literals.get(key)==target_source_literals[key]
+                                       or key not in previous_literals and not re.search(r'⟦P\d+⟧',target_sources[key]))
+                                  and isinstance(value,str) and value.strip()}
         self.preparation_warnings=[]
         try:
             await self.glossary_async()
@@ -429,6 +449,7 @@ class AsyncTranslator(Translator):
             write_json(self.work/'translation-failures.json',failures)
             write_json(self.work/'translation-ledger.json',{'source_sha256':self.document.source_sha256,'config_fingerprint':self.config.fingerprint(),
                 'selected_pages':selected,'completed_pages':sorted(completed),'translations':translations,'accepted_candidates':getattr(self,'accepted_candidates',{}),
+                'target_sources':target_sources,'target_source_literals':target_source_literals,
                 'usage':self.client.usage,'failures':failures,'preparation_warnings':self.preparation_warnings,'page_keys':page_keys})
         # Every group can run independently. The transport admits new requests
         # as each slot/quota becomes available; there is no batch-wide barrier.

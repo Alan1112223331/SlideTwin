@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import re
 import statistics
+import unicodedata
 
 import pymupdf as fitz
 
@@ -12,13 +13,20 @@ from .models import Document, Page, Region, digest, write_json, read_cache
 from .raster import raster_container
 
 
-EXTRACT_VERSION = "33"
+EXTRACT_VERSION = "34"
 BULLETS = "•●▪◦‣–➢\uf0b7\uf0a7\uf071\uf06d✓✔☑❑"
-MATH_FONT = re.compile(r"symbol|math|cmmi|cmsy|cmex|mtextra", re.I)
+MATH_FONT = re.compile(r"symbol|math|cmmi|cmsy|cmex|mtextra|(?:r?ntx|rtx)(?:b?mi|sy|ex)|txsy|txex|ntxsups", re.I)
 NUMBERS = re.compile(r"(?<![\w⟦])\d+(?:[.,]\d+)*(?:%|[⁰¹²³⁴⁵⁶⁷⁸⁹])?(?![\w⟧])")
 SYMBOLIC_AXIS = re.compile(r"[IVPRCLftxyz][a-z₀-₉⁰¹²³⁴⁵⁶⁷⁸⁹_]{0,3}\s*\(\s*(?:[fpnuμµmkMGT]?(?:A|V|W|s|m|F|H|Ω|Hz)|dB|K|°C)\s*\)")
 IMMUTABLE_VARIABLE = re.compile(r'(?:t(?:phl|plh|p?ff\d*|su\d*|h\d*|hold|skew|cq|cl|cs|cycle|jitter|pd|cd|inv|xor|and|or|clock|clk|ctk|ox|i|p|min|max)(?:[-_]?(?:min|max))?|v(?:in|out|gs|ds|gd|dd|ss|th|tp|tn|sb|bs|t)|i(?:ds|d|s|g)|c(?:gd|gs|gb|ox|in|out)|g(?:[sdmb]|gd)|[dp](?:in|out)|su|clk|er|ec)',re.I)
 MATH_FUNCTIONS={'clip','round','min','max','abs','sign','relu','softmax','sigmoid','sqrt','floor','ceil','sin','cos','tan','tanh','exp','log','ln','sum','median','mean','var','std'}
+
+
+def native_math_glyph(char: dict) -> bool:
+    # Mathematical Alphanumeric Symbols encode their mathematical typography
+    # directly. Embedded PDF fonts may have opaque names such as F1/F2, so the
+    # source character encoding must also identify these immutable glyphs.
+    return bool(MATH_FONT.search(char['font'])) or any(0x1D400<=ord(c)<=0x1D7FF for c in char['c'])
 
 
 def immutable_math_label(text: str) -> bool:
@@ -100,6 +108,128 @@ def ordered_cell_chars(chars: list[dict]) -> list[dict]:
     return result
 
 
+def native_visual_lines(lines: list[dict]) -> list[dict]:
+    """Join adjacent PDF objects on one measured baseline before grouping.
+
+    PDF raw lines are drawing objects, not necessarily visual lines. In
+    particular, a stacked subscript can start the next raw line while the prose
+    following it remains on the preceding baseline. Reconstruct that row first
+    so descriptor and paragraph boundaries cannot split a mathematical atom.
+    Large horizontal gaps and different directions retain separate labels.
+    """
+    rows = []
+    for index, line in enumerate(lines):
+        chars = [{**c, "fragment": index} for c in line["chars"]]
+        size = max(c["size"] for c in chars)
+        main = [c for c in chars if c["size"] >= size*.85 and not c["c"].isspace()]
+        baseline = statistics.median(c["origin"][1] for c in main or chars)
+        box = fitz.Rect(chars[0]["bbox"])
+        for char in chars[1:]:
+            box |= fitz.Rect(char["bbox"])
+        rows.append({**line, "chars": chars, "size": size, "baseline": baseline,
+                     "box": box, "order": index})
+    # Use the larger row as the anchor for a separately drawn small script.
+    for small in sorted(rows, key=lambda row: row["size"]):
+        if small.get("removed") or small["dir"] != [1.0, 0.0] or not all(c["c"].isalnum() for c in small["chars"]):
+            continue
+        candidates = []
+        for row in rows:
+            if row is small or row.get("removed") or row["dir"] != small["dir"] or row["size"] <= small["size"]*1.18:
+                continue
+            if not .12*row["size"] < abs(small["baseline"]-row["baseline"]) < .75*row["size"]:
+                continue
+            if any(c["c"].isalnum() and c["size"] >= row["size"]*.85
+                   and -.2*row["size"] <= small["box"].x0-c["bbox"][2] <= .4*row["size"]
+                   for c in row["chars"]):
+                candidates.append(row)
+        if candidates:
+            row = min(candidates, key=lambda candidate: abs(candidate["baseline"]-small["baseline"]))
+            row["chars"].extend(small["chars"])
+            row["box"] |= small["box"]
+            row["order"] = min(row["order"], small["order"])
+            small["removed"] = True
+    rows = [row for row in rows if not row.get("removed")]
+    rows.sort(key=lambda row: (row["baseline"], row["box"].x0))
+    merged = []
+    for row in rows:
+        adjacent = next((previous for previous in reversed(merged)
+                         if previous["dir"] == row["dir"] == [1.0, 0.0]
+                         and abs(previous["baseline"]-row["baseline"]) < max(previous["size"], row["size"])*.12
+                         and abs(previous["size"]-row["size"]) < max(previous["size"], row["size"])*.15
+                         and -.6*row["size"] <= row["box"].x0-previous["box"].x1 <= .65*row["size"]), None)
+        if adjacent:
+            adjacent["chars"].extend(row["chars"])
+            adjacent["box"] |= row["box"]
+            adjacent["order"] = min(adjacent["order"], row["order"])
+        else:
+            merged.append(row)
+    result = []
+    for row in sorted(merged, key=lambda row: row["order"]):
+        chars = sorted(row["chars"], key=lambda c: c["origin"][0]) if row["dir"] == [1.0, 0.0] else row["chars"]
+        spaced = []
+        for char in chars:
+            if spaced:
+                previous = spaced[-1]
+                # Preserve a visible word gap between separately drawn prose,
+                # but never insert a space between a base and its script.
+                if (previous["fragment"] != char["fragment"] and not previous["c"].isspace()
+                        and not char["c"].isspace() and char["bbox"][0]-previous["bbox"][2] > row["size"]*.18
+                        and abs(char["origin"][1]-previous["origin"][1]) < row["size"]*.12):
+                    spaced.append({**char, "c": " ", "font": "spacing"})
+            spaced.append(char)
+        result.append({"chars": spaced, "dir": row["dir"]})
+    return result
+
+
+def native_ocr_key(text: str) -> str:
+    """Compare local glyph identities despite PDF/OCR encoding differences."""
+    text = unicodedata.normalize("NFKC", text)
+    text = text.translate(str.maketrans({c: "-" for c in "‐‑‒–—−"}))
+    return re.sub(r"\s+", "", text).casefold()
+
+
+def table_physical_line_styles(chars: list[dict], styles: list[dict], protected: dict[str, str]) -> list[dict]:
+    """Append source row correspondences without splitting the main cell text.
+
+    The caller has already proved that the glyphs share a native bordered cell.
+    Main-size glyph baselines anchor each physical row; small scripts join their
+    nearest row. Row correspondence is translation data, while break markers
+    and source typography remain exclusively program-owned.
+    """
+    rows=[]
+    for char in sorted((c for c in chars if c.get('font')!='spacing'), key=lambda c:-c['size']):
+        candidates=[row for row in rows if abs(row[0]['origin'][1]-char['origin'][1])<row[0]['size']*.6]
+        if candidates:
+            min(candidates,key=lambda row:abs(row[0]['origin'][1]-char['origin'][1])).append(char)
+        else:rows.append([char])
+    rows.sort(key=lambda row:row[0]['origin'][1])
+    if len(rows)<2:return styles
+    # Unchanged indices are essential: existing color/emphasis child IDs have
+    # already been defined by inline_styles, and decorations may append later.
+    styles=[dict(style) for style in styles]
+    def literal(value):
+        for token,text in protected.items():value=value.replace(token,text)
+        return re.sub(r'\s+',' ',value).strip()
+    for index,row in enumerate(rows):
+        row.sort(key=lambda c:c['origin'][0])
+        source=re.sub(r'\s+',' ',''.join(c['c'] for c in row)).strip()
+        if not source:continue
+        matches=[style for style in styles if literal(style.get('source',''))==source]
+        if matches:
+            # Several typography spans with the same source are left indexed
+            # as they were. One correspondence owns this physical row break.
+            style=matches[0]
+        else:
+            visible=[c for c in row if not c['c'].isspace()]
+            color,bold,italic=Counter((c['color'],bool(c['flags']&16),bool(c['flags']&2)) for c in visible).most_common(1)[0][0]
+            box=fitz.Rect(visible[0]['bbox'])
+            for char in visible[1:]:box|=fitz.Rect(char['bbox'])
+            style={'source':source,'color':color,'bold':bold,'italic':italic,'bbox':list(box)}
+            styles.append(style)
+        style.update(structural_line=True,source_line_index=index,break_before=index>0,break_after=False)
+    return styles
+
+
 def protect_native_math(chars: list[dict], text: str) -> tuple[str, dict[str, str], dict[str, dict]]:
     """Keep mathematical font glyphs as inline visual assets, not guessed Unicode.
 
@@ -110,7 +240,11 @@ def protect_native_math(chars: list[dict], text: str) -> tuple[str, dict[str, st
     for char in chars:
         if expanded:
             previous = expanded[-1]
-            if char["origin"][0] < previous["origin"][0] and char["origin"][1]-previous["origin"][1] > char["size"]*0.6:
+            newline = char["origin"][0] < previous["origin"][0] and char["origin"][1]-previous["origin"][1] > char["size"]*0.6
+            object_gap = (char.get("fragment") != previous.get("fragment")
+                          and abs(char["origin"][1]-previous["origin"][1]) < max(char["size"], previous["size"])*.12
+                          and char["bbox"][0]-previous["bbox"][2] > max(char["size"], previous["size"])*.18)
+            if newline or object_gap:
                 expanded.append({**char, "c": " ", "font": "spacing"})
         expanded.append(char)
     chars = expanded
@@ -118,9 +252,11 @@ def protect_native_math(chars: list[dict], text: str) -> tuple[str, dict[str, st
     # Compare only nearby glyphs on the same visual line, not another paragraph.
     mask = []
     for c in chars:
-        nearby = [p for p in chars if abs(p["origin"][1]-c["origin"][1]) < max(p["size"], c["size"])*0.7 and p["size"] > c["size"]*1.18]
+        nearby = [p for p in chars if abs(p["origin"][1]-c["origin"][1]) < max(p["size"], c["size"])*0.7
+                  and p["size"] > c["size"]*1.18
+                  and -.25*p["size"] <= c["bbox"][0]-p["bbox"][2] <= .55*p["size"]]
         shifted = any(abs(p["origin"][1]-c["origin"][1]) > p["size"]*0.12 for p in nearby)
-        mask.append((bool(MATH_FONT.search(c["font"])) or shifted) and not c["c"].isspace())
+        mask.append((native_math_glyph(c) or shifted) and not c["c"].isspace())
     # Author identities are immutable source glyphs too. This prevents a model
     # from omitting a given name or inconsistently transliterating a repeated
     # copyright footer across pages.
@@ -141,6 +277,23 @@ def protect_native_math(chars: list[dict], text: str) -> tuple[str, dict[str, st
         for step in [-1, 1]:
             j = i+step
             while 0 <= j < len(chars) and j not in prose_indices and re.fullmatch(r"[A-Za-z0-9α-ωΑ-Ω₀-₉ₐ-ₜ⁰¹²³⁴⁵⁶⁷⁸⁹_]", chars[j]["c"]):
+                previous = chars[j-step]
+                candidate = chars[j]
+                # An adjacent ordinary-font word is not part of a math-font
+                # run. A shifted script may still use another font, so permit
+                # its immediately adjacent base and script glyphs.
+                font_change = native_math_glyph(previous) and not native_math_glyph(candidate)
+                script_link = ((abs(previous["origin"][1]-candidate["origin"][1]) > max(previous["size"], candidate["size"])*.12
+                                or re.search(r"[₀-₉ₐ-ₜ⁰¹²³⁴⁵⁶⁷⁸⁹]", previous["c"]))
+                               and candidate["origin"][0] <= previous["origin"][0])
+                if font_change and not script_link:
+                    break
+                if (not native_math_glyph(candidate) and candidate["size"] > previous["size"]*1.18
+                        and candidate["origin"][0] > previous["origin"][0]
+                        and abs(previous["origin"][1]-candidate["origin"][1]) > candidate["size"]*.12):
+                    break
+                if abs(previous["origin"][0]-candidate["origin"][0]) > max(previous["size"], candidate["size"])*1.2:
+                    break
                 mask[j] = True
                 j += step
     runs = []
@@ -167,7 +320,7 @@ def protect_native_math(chars: list[dict], text: str) -> tuple[str, dict[str, st
             box |= fitz.Rect(c["bbox"])
         main_size=max(c['size'] for c in run)
         row_baseline=statistics.median(c['origin'][1] for c in run if c['size']>=main_size*.85)
-        nearby=[c['origin'][1] for c in chars if not MATH_FONT.search(c['font']) and c['size']>=main_size*.85 and abs(c['origin'][1]-row_baseline)<main_size*.3]
+        nearby=[c['origin'][1] for c in chars if not native_math_glyph(c) and c['size']>=main_size*.85 and abs(c['origin'][1]-row_baseline)<main_size*.3]
         baseline=statistics.median(nearby) if nearby else row_baseline
         marker = f"⟪M{index}⟫"
         assets_by_marker[marker] = {"text": value, "bbox": list(box), "baseline_down": max(0, box.y1-baseline)}
@@ -197,7 +350,7 @@ def inline_styles(chars: list[dict], base: tuple) -> list[dict]:
         if style == base or not needs_translation(phrase) or not re.search(r"[A-Za-z]{3,}", phrase):
             continue
         # Mathematical runs are handled by immutable original-glyph assets.
-        if any(MATH_FONT.search(c["font"]) for c in run) or re.search(r"\b(?:Dr|Prof)\.", phrase):
+        if any(native_math_glyph(c) for c in run) or re.search(r"\b(?:Dr|Prof)\.", phrase):
             continue
         result.append({"source": phrase, "color": style[0], "bold": style[1], "italic": style[2]})
     return result
@@ -342,7 +495,7 @@ def enrich_page(page: fitz.Page, number: int, descriptors: list[dict], preserved
     """
     groups = defaultdict(list)
     issues = []
-    native = native_lines(page)
+    native = native_visual_lines(native_lines(page))
     # Recover a word's final glyph when a PDF exporter emits it as a separate
     # text object. Join only an adjacent same-font, same-baseline alphabetic run.
     consumed=set()
@@ -378,6 +531,21 @@ def enrich_page(page: fitz.Page, number: int, descriptors: list[dict], preserved
             winner=Counter(i for i,c in owners).most_common(1)[0][0]
             for i,c in owners:
                 if i!=winner:assigned[i].remove(c);assigned[winner].append(c)
+        # Small Docling cells must not split a native base from its adjacent
+        # scripts. The immutable asset's geometry defines one ownership unit;
+        # this does not inspect translated language or request model retries.
+        _, _, math_assets = protect_native_math(line["chars"], literal)
+        for asset in math_assets.values():
+            atom = fitz.Rect(asset["bbox"]) + (-.02, -.02, .02, .02)
+            owners = [(i, c) for i, chars in assigned.items() for c in chars
+                      if not c["c"].isspace() and (fitz.Rect(c["bbox"]).tl+fitz.Rect(c["bbox"]).br)/2 in atom]
+            if len({i for i, c in owners}) < 2:
+                continue
+            winner = Counter(i for i, c in owners).most_common(1)[0][0]
+            for i, c in owners:
+                if i != winner:
+                    assigned[i].remove(c)
+                    assigned[winner].append(c)
         assigned={i:sorted(chars,key=lambda c:c['sequence']) for i,chars in assigned.items() if chars}
         for index, chars in assigned.items():
             spaced=[]
@@ -421,6 +589,7 @@ def enrich_page(page: fitz.Page, number: int, descriptors: list[dict], preserved
             for line in lines:
                 chars=line['chars'];colon=next((i for i,c in enumerate(chars) if c['c']==':'),None)
                 literal=''.join(c['c'] for c in chars)
+                ranges=[]
                 if literal.strip() in {'channel','overlap'}:continue
                 # An English subscript is part of the formula, not a diagram
                 # caption. Recognize its larger, immediately preceding base.
@@ -434,16 +603,25 @@ def enrich_page(page: fitz.Page, number: int, descriptors: list[dict], preserved
                 # Quantifiers inside an equation are prose; equation operands
                 # remain source-owned artwork on either side of the phrase.
                 for phrase in re.finditer(r'\b(?:for every|for all|where)\b',literal,re.I):
-                    labeled.append({**line,'chars':chars[phrase.start():phrase.end()]})
+                    ranges.append((phrase.start(),phrase.end()))
                 if colon is not None:
                     prefix=''.join(c['c'] for c in chars[:colon+1])
                     if needs_translation(prefix) and re.search(r'[A-Za-z]{4,}',prefix):
-                        labeled.append({**line,'chars':chars[:colon+1]})
+                        ranges.append((0,colon+1))
                 elif any(w.lower() not in MATH_FUNCTIONS and not IMMUTABLE_VARIABLE.fullmatch(w)
                          for w in re.findall(r'[A-Za-z]{4,}',''.join(c['c'] for c in chars))):
                     equals=next((i for i,c in enumerate(chars) if c['c']=='='),None)
                     prefix=''.join(c['c'] for c in chars[:equals]) if equals is not None else ''
-                    labeled.append({**line,'chars':chars[:equals+1] if equals is not None and re.search(r'[A-Za-z]{4,}',prefix) else chars})
+                    ranges.append((0,equals+1 if equals is not None and re.search(r'[A-Za-z]{4,}',prefix) else len(chars)))
+                # Phrase and label-prefix detection can cover the same glyphs
+                # (e.g. "where K ="). Union their intervals before creating
+                # targets; a source glyph can only have one translation owner.
+                united=[]
+                for start,end in sorted(ranges):
+                    if united and start<=united[-1][1]:
+                        united[-1]=(united[-1][0],max(end,united[-1][1]))
+                    else:united.append((start,end))
+                labeled.extend({**line,'chars':chars[start:end]} for start,end in united)
             lines=labeled
             if not lines:continue
         reversed_rows=any(a['chars'][0]['origin'][1]>b['chars'][0]['origin'][1]+a['chars'][0]['size']*.3 for a,b in zip(lines,lines[1:]))
@@ -538,9 +716,13 @@ def enrich_page(page: fitz.Page, number: int, descriptors: list[dict], preserved
                b.x0-2 <= (c['bbox'][0]+c['bbox'][2])/2 <= b.x1+2 and
                max(b.y0,c['bbox'][1]) < min(b.y1,c['bbox'][3]) and
                abs((b.y0+b.y1)/2-(c['bbox'][1]+c['bbox'][3])/2)<max(b.height,c['size'])*.5]
-        local.sort(key=lambda c:(round(c['origin'][1]/max(1,c['size']*.4)),c['origin'][0]))
-        normalized=lambda value:re.sub(r'\s+','',value).casefold()
-        if normalized(descriptor['text']) and normalized(descriptor['text'])==normalized(''.join(c['c'] for c in local)):
+        # Keep the measured visual-row order, including attached scripts.
+        # Sorting each glyph by its own baseline puts subscripts after prose.
+        positions={id(c):i for i,c in enumerate(c for line in sorted(native,key=lambda line:(
+            statistics.median(c['origin'][1] for c in line['chars'] if c['size']>=max(x['size'] for x in line['chars'])*.85),
+            line['chars'][0]['origin'][0])) for c in line['chars'])}
+        local.sort(key=lambda c:positions[id(c)])
+        if native_ocr_key(descriptor['text']) and native_ocr_key(descriptor['text'])==native_ocr_key(''.join(c['c'] for c in local)):
             issues.append({'page':number,'kind':'duplicate_native_ocr','blocking':False,'text':descriptor['text'],'bbox':list(b)})
             continue
         # OCR labels carry the actual OCR region. Raster treatment is separately
@@ -585,6 +767,7 @@ def enrich_page(page: fitz.Page, number: int, descriptors: list[dict], preserved
     vector_cells=defaultdict(list)
     rectangles=[fitz.Rect(d['rect']) for d in page.get_drawings() if d.get('color') is not None and
                 len(d['items'])==1 and d['items'][0][0]=='re']
+    bordered_cells={tuple(box) for box in rectangles}
     for entry in entries:
         if not entry.native:continue
         candidates=[b for b in rectangles if fitz.Rect(entry.bbox) in b+(-2,-2,2,2) and
@@ -635,15 +818,24 @@ def enrich_page(page: fitz.Page, number: int, descriptors: list[dict], preserved
         box=fitz.Rect(group[0].bbox)
         for r in group[1:]:box.include_rect(fitz.Rect(r.bbox))
         for r in group:entries.remove(r)
+        styles=inline_styles(chars,base)
+        if coordinates in bordered_cells:
+            styles=table_physical_line_styles(chars,styles,protected)
         entries.append(Region('',number,source,list(box),role='table_cell',size=statistics.median(r.size for r in group),
                               color=base[0],bold=base[1],erase=[b for r in group for b in r.erase],protected=protected,
-                              protected_assets=assets,inline_styles=inline_styles(chars,base),direction=group[0].direction,
+                              protected_assets=assets,inline_styles=styles,direction=group[0].direction,
                               docling_ref=';'.join(r.docling_ref for r in group)))
     entries.sort(key=lambda r: (round(r.bbox[1], 1), r.bbox[0]))
     for index, entry in enumerate(entries):
         entry.id = f"p{number:04d}_r{index:04d}"
         if abs(entry.direction[0]-1) > 0.02 or abs(entry.direction[1]) > 0.02:
             issues.append({"page": number, "kind": "rotated_text", "id": entry.id, "blocking": True})
+        # Decoration geometry becomes a source style target before translation.
+        # The model only translates its exact source phrase; the renderer owns
+        # the measured underline and its final position after text wrapping.
+        from .decorations import source_decorations
+        entry.inline_styles, decoration = source_decorations(page, entry, native, create_styles=True)
+        issues.extend(decoration.warnings)
     return entries, issues
 
 

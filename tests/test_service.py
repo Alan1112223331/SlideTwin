@@ -215,7 +215,9 @@ def test_text_export_uses_retained_translations_and_preserves_source_pair(tmp_pa
     ])])
     document.save(work / 'document.json')
     write_json(work / 'translation-ledger.json', {'source_sha256': 'source-hash', 'config_fingerprint': config.fingerprint(),
-                                                'translations': {'a': '电压 ⟦P000⟧'}})
+                                                'translations': {'a': '电压 ⟦P000⟧'},
+                                                'target_sources': {'a': 'Voltage ⟦P000⟧', 'b': 'Unavailable text'},
+                                                'target_source_literals': {'a': 'Voltage 6', 'b': 'Unavailable text'}})
     monkeypatch.setattr(worker, '_load_config', lambda: config)
     worker.text_exports(work, [1], out, ['chinese', 'bilingual'])
     cn = read_cache(out / 'chinese.json')['pages'][0]['blocks']
@@ -238,7 +240,8 @@ def test_unplaced_text_is_available_in_api_report_without_internal_paths(tmp_pat
         ])
         document.save(work/'document.json')
         write_json(work/'translation-ledger.json',{'source_sha256':'source-hash',
-                   'config_fingerprint':config.fingerprint(),'translations':{'a':text}})
+                   'config_fingerprint':config.fingerprint(),'translations':{'a':text},
+                   'target_sources':{'a':'Source text'}})
         output.write_bytes(pdf_bytes(4))
         return {'status':'completed_with_warnings','previous_output_backup':'/private/internal.pdf',
                 'pages':[{'source_page':1,'missing_targets':[],'overflow_targets':['a'],
@@ -251,9 +254,14 @@ def test_unplaced_text_is_available_in_api_report_without_internal_paths(tmp_pat
     result=run_job(job)
     assert result['status']=='completed_with_warnings'
     assert result['outputs']=={'chinese':'ready','bilingual':'ready'}
-    assert result['page_issues']==[{'source_page':1,'missing_targets':[],'overflow_targets':['a'],
-                                  'extraction_failed':False,'unplaced_translations':[
-                                      {'id':'a','bbox':[30,40,100,60],'translation':text}]}]
+    page=result['page_issues'][0]
+    assert {key:page[key] for key in ('source_page','missing_targets','overflow_targets',
+            'extraction_failed','unplaced_translations')}=={
+        'source_page':1,'missing_targets':[],'overflow_targets':['a'],
+        'extraction_failed':False,'unplaced_translations':[
+            {'id':'a','bbox':[30,40,100,60],'translation':text}]}
+    assert page['chinese_page']==1 and page['bilingual_translated_page']==2
+    assert page['unplaced_targets']==['a'] and page['issues'][0]['kind']=='unspecified'
     report=read_cache(job/'artifacts/report.json')
     assert report==result and '/private/' not in json.dumps(report)
     assert read_cache(job/'artifacts/chinese.json')['pages'][0]['blocks'][0]['translation']==text

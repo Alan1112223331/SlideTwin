@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import asdict
 import os
 import shutil
 import subprocess
@@ -90,6 +91,12 @@ def run(source: Path, output: Path, work: Path, config: Settings, pages=None, pr
                 write_json(work/"qa.json", report)
                 write_json(work/"run.json", report)
                 raise LayoutError("Quality checks need review; retaining the candidate and exporting with local recovery")
+            report['layout_warnings']=read_cache(work/'layout-plan.json').get('warnings',[])
+            try:
+                write_json(work/'final-layout-plan.json',{'placements':[asdict(p) for p in placements],
+                           'selected_pages':selected,'output_sha256':digest(candidate.read_bytes())})
+            except OSError as exc:
+                report.setdefault('diagnostic_warnings',[]).append({'kind':'final_plan_write_failed','type':type(exc).__name__})
             output.parent.mkdir(parents=True, exist_ok=True)
             # Copy to the destination filesystem and atomically replace only after
             # all checks pass. Keeps a previous good result intact on any failure.
@@ -110,15 +117,21 @@ def run(source: Path, output: Path, work: Path, config: Settings, pages=None, pr
                 except (RuntimeError,OSError,subprocess.SubprocessError) as exc:
                     report['preview_error']=str(exc)
                     log(f'PDF published; preview generation failed: {exc}')
-            if report.get('preparation_warnings') or report.get('preview_error'):
+            if report.get('preparation_warnings') or report.get('preview_error') or report.get('layout_warnings') or report.get('diagnostic_warnings'):
                 report['status']='completed_with_warnings'
-                write_json(output.with_suffix('.issues.json'),report)
+                try:write_json(output.with_suffix('.issues.json'),report)
+                except OSError:log('PDF published; the issues report could not be saved')
             elif output.with_suffix('.issues.json').exists():
                 # A recovered run must not leave the previous failure report
                 # apparently attached to its new PDF.
-                write_json(output.with_suffix('.issues.json'),report)
-            write_json(work/"qa.json", report)
-            write_json(work/"run.json", report)
+                try:write_json(output.with_suffix('.issues.json'),report)
+                except OSError:log('PDF published; the issues report could not be saved')
+            for path in [work/'qa.json',work/'run.json']:
+                try:write_json(path,report)
+                except OSError:
+                    report['status']='completed_with_warnings'
+                    report.setdefault('diagnostic_warnings',[]).append({'kind':'diagnostic_write_failed'})
+                    log('PDF published; a diagnostic file could not be saved')
             log(f"Created {output}; visual comparison sheets: {work/'preview'}")
             return report
     except Timeout:

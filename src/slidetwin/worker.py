@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import traceback
 
@@ -13,6 +14,132 @@ from .docling_export import convert_docling
 from .models import Document, digest, read_cache, write_json
 from .pipeline import parse_pages, run
 from .service_job import collect_artifacts, job_path, now, update
+from .qa import page_indices, verify
+from .render import Placement
+
+
+ISSUE_REASONS = {
+    'layout_blocked': ('layout_fit', 'Translated text did not fit the available frame.'),
+    'missing_font_glyph': ('font', 'No configured font could render the listed characters.'),
+    'translated_text_overlap': ('layout_overlap', 'Translated frames overlap each other.'),
+    'local_render_failure': ('rendering', 'Local text rendering failed; other blocks were retained.'),
+    'region_preflight_failed': ('rendering', 'This region could not be prepared for rendering.'),
+    'source_pixels_retained': ('content_preservation', 'Source pixels were retained because no safe erase geometry was available.'),
+    'inserted_text_not_extractable': ('text_layer', 'The expected character sequence could not be recovered within this target frame.'),
+    'original_page_pixels_changed': ('graphics', 'The copied original page differs from the source at the verification resolution.'),
+    'graphics_outside_edit_regions_changed': ('graphics', 'Pixels changed outside the declared edit regions.'),
+    'page_count': ('document_structure', 'The output page count differs from the requested page count.'),
+    'page_dimensions': ('document_structure', 'The translated page dimensions differ from the source.'),
+    'raster_dimensions': ('document_structure', 'The rendered page dimensions differ from the source.'),
+    'missing_translation': ('missing_content', 'No model translation was available for this target.'),
+    'unsupported_text_rotation': ('layout_rotation', 'This text rotation could not be rendered safely.'),
+    'unmatched_emphasis': ('text_style', 'A source emphasis span could not be placed; base styling was used.'),
+    'underline_mapping_unavailable': ('text_style', 'The partial source underline has no matching translated style target; the source line was retained.'),
+    'underline_background_unsafe': ('text_style', 'The source underline could not be cleared without risking adjacent graphics or a nonuniform background.'),
+    'rotated_text': ('layout_rotation', 'Rotated source text requires a supported local rendering path.'),
+    'docling_partial_result': ('extraction', 'Docling returned an incomplete extraction for this page.'),
+    'supplemental_ocr_failed': ('extraction', 'Supplemental OCR failed on this page.'),
+    'ocr_refinement_failed': ('extraction', 'OCR refinement failed on this page.'),
+    'page_enrichment_failed': ('extraction', 'Native and extracted text could not be fully reconciled on this page.'),
+    'page_text_unavailable': ('extraction', 'No usable text extraction was available for this page.'),
+}
+
+
+def public_issue(issue: dict, indices: dict[int, dict], *, phase='final', output_mode=None) -> dict:
+    """Allowlist diagnostics rather than exposing exceptions or private paths."""
+    kind = issue.get('kind', 'unspecified')
+    if not isinstance(kind, str) or not re.fullmatch(r'[a-z][a-z0-9_]*', kind):
+        kind = 'unspecified'
+    category, reason = ISSUE_REASONS.get(kind, ('processing', 'This diagnostic requires review; see its kind and target IDs.'))
+    number = issue.get('source_page', issue.get('page'))
+    result = {'kind': kind, 'category': category, 'reason': reason,
+              'phase': issue.get('phase') if issue.get('phase') in {'final', 'intermediate'} else phase}
+    if isinstance(number, int):
+        result.update(indices.get(number, {'source_page': number}))
+    if output_mode in {'chinese', 'bilingual'}:
+        result['output_mode'] = output_mode
+    ids = issue.get('region_ids') or issue.get('ids') or ([issue['id']] if issue.get('id') else [])
+    result['region_ids'] = [v for v in ids if isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,160}', v)]
+    if issue.get('id') in result['region_ids']:
+        result['id'] = issue['id']
+    if issue.get('ids'):
+        result['ids'] = result['region_ids']
+    for key in ('pixels', 'expected', 'actual', 'unmapped_glyphs', 'missing_character_count',
+                'expected_character_count', 'observed_character_count', 'blocking', 'recovered'):
+        if isinstance(issue.get(key), (int, float, bool)):
+            result[key] = issue[key]
+    for key in ('characters', 'missing_characters'):
+        if isinstance(issue.get(key), list):
+            result[key] = [v for v in issue[key] if isinstance(v, str) and len(v) == 1][:256]
+    for key in ('reason_code', 'check', 'action'):
+        value = issue.get(key)
+        if isinstance(value, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,120}', value):
+            result[key] = value
+    if kind == 'inserted_text_not_extractable' and result.get('reason_code') == 'invalid_unicode_mapping':
+        result['reason'] = 'The PDF text layer contains unmapped glyphs; this check does not establish visual text loss.'
+    return result
+
+
+def public_diagnostics(result: dict, selected: list[int], work: Path) -> dict:
+    """Expose every page diagnostic, including pages without unplaced text."""
+    indices = page_indices(selected)
+    pages = {}
+    document_issues = []
+
+    def add(issue, phase='final', warning=False, output_mode=None):
+        safe = public_issue(issue, page_indices(selected, bilingual=output_mode != 'chinese'),
+                            phase=phase, output_mode=output_mode)
+        number = safe.get('source_page')
+        if number not in indices:
+            document_issues.append(safe)
+            return
+        page = pages.setdefault(number, {**indices[number], 'missing_targets': [], 'overflow_targets': [],
+                               'unplaced_targets': [], 'extraction_failed': False,
+                               'unplaced_translations': [], 'issues': [], 'warnings': [],
+                               'intermediate_diagnostics': []})
+        field = 'intermediate_diagnostics' if safe['phase'] == 'intermediate' else 'warnings' if warning else 'issues'
+        if safe not in page[field]:
+            page[field].append(safe)
+
+    for info in result.get('pages', []):
+        number = info.get('source_page')
+        if number not in indices:
+            continue
+        for field in ('issues', 'warnings', 'intermediate_diagnostics'):
+            for issue in info.get(field, []):
+                add(dict(issue, source_page=number), 'intermediate' if field == 'intermediate_diagnostics' else 'final',
+                    warning=field == 'warnings')
+        if any(info.get(key) for key in ('missing_targets', 'overflow_targets', 'unplaced_targets', 'extraction_failed', 'unplaced_translations')):
+            # Even legacy results without an issue kind must retain their targets.
+            pages.setdefault(number, {**indices[number], 'issues': [], 'warnings': [], 'intermediate_diagnostics': []})
+        if number in pages:
+            page = pages[number]
+            page.update(missing_targets=info.get('missing_targets', []),
+                        overflow_targets=info.get('overflow_targets', []),
+                        unplaced_targets=info.get('unplaced_targets', info.get('overflow_targets', [])),
+                        extraction_failed=info.get('extraction_failed', False),
+                        unplaced_translations=[{key: block.get(key) for key in ('id', 'bbox', 'translation')}
+                                               for block in info.get('unplaced_translations', [])])
+    for issue in result.get('failures', []) + result.get('layout_failures', []):
+        add(issue)
+    for issue in result.get('intermediate_diagnostics', []):
+        add(issue, phase='intermediate')
+    for issue in result.get('preparation_warnings', []):
+        if isinstance(issue, dict):
+            add(issue, warning=True)
+    for issue in read_cache(work / 'layout-plan.json').get('warnings', []):
+        add(issue, warning=True)
+    for mode, qa in result.get('product_qa', {}).items():
+        for failure in qa.get('failures', []):
+            add(failure, output_mode=mode)
+    final_qa = result.get('final_qa', {})
+    for failure in final_qa.get('failures', []):
+        add(failure)
+    for page in pages.values():
+        page['unplaced_reasons'] = {key: [i for i in page['issues'] if key in i['region_ids']]
+                                   for key in page.get('unplaced_targets', [])}
+    return {'page_issues': [pages[number] for number in selected if number in pages],
+            'document_issues': document_issues}
 
 
 def publish_copy(source: Path, destination: Path):
@@ -79,7 +206,8 @@ def run_job(job: Path, max_pages: int = 500):
     selected = []
     warnings = []
     errors = []
-    page_issues = []
+    translation_result = {}
+    product_qa = {}
     work = job / 'work'
     artifacts = job / 'artifacts'
     artifacts.mkdir(exist_ok=True)
@@ -118,21 +246,9 @@ def run_job(job: Path, max_pages: int = 500):
             config = _load_config()
             output = work / 'bilingual-output.pdf'
             result = run(source, output, work, config, pages=request.get('pages'), preview=False, log=progress)
+            translation_result = result
             if result.get('status') != 'automated_checks_passed':
                 warnings.append('translation_or_layout_needs_review')
-            # Expose retained overflow text without publishing private paths,
-            # tracebacks or other internal fields from the CLI issues report.
-            for page in result.get('pages', []):
-                if page.get('overflow_targets') or page.get('missing_targets') or page.get('extraction_failed'):
-                    page_issues.append({
-                        'source_page': page['source_page'],
-                        'missing_targets': page.get('missing_targets', []),
-                        'overflow_targets': page.get('overflow_targets', []),
-                        'extraction_failed': page.get('extraction_failed', False),
-                        'unplaced_translations': [
-                            {key: block.get(key) for key in ('id', 'bbox', 'translation')}
-                            for block in page.get('unplaced_translations', [])],
-                    })
             update(job, stage='exporting')
             # Each product is isolated: a Markdown or Chinese-PDF export failure
             # cannot discard a successfully produced bilingual PDF or Docling tree.
@@ -148,6 +264,30 @@ def run_job(job: Path, max_pages: int = 500):
                     text_exports(work, selected, artifacts, [mode])
                 except Exception as exc:
                     record_error(mode + '_text', exc)
+            # Recheck the actual downloadable products, after Chinese-page
+            # extraction and final PDF serialization. Intermediate warnings
+            # are historical evidence, not a verdict on this product's bytes.
+            plan = read_cache(work / 'final-layout-plan.json')
+            if isinstance(plan.get('placements'), list) and plan.get('output_sha256') == digest(output.read_bytes()):
+                placements = [Placement(**entry) for entry in plan['placements']]
+                for mode in modes:
+                    product = artifacts / f'{mode}.pdf'
+                    if not product.is_file():
+                        continue
+                    try:
+                        qa = verify(source, product, selected, placements, work / f'{mode}-final-qa',
+                                    bilingual=mode == 'bilingual', phase='final')
+                        translation_result.setdefault('product_qa', {})[mode] = qa
+                        product_qa[mode] = {key: qa[key] for key in ('passed', 'phase', 'output_mode',
+                                                                 'source_sha256', 'output_sha256')}
+                        product_qa[mode]['failures'] = [public_issue(i, page_indices(selected, bilingual=mode == 'bilingual'),
+                                                                   output_mode=mode) for i in qa['failures']]
+                        if not qa['passed']:
+                            warnings.append(f'{mode}_final_checks_need_review')
+                    except Exception as exc:
+                        record_error(mode + '_verification', exc)
+            else:
+                warnings.append('final_placement_evidence_unavailable')
     except Exception as exc:
         record_error('processing', exc)
     available = collect_artifacts(job)
@@ -157,8 +297,9 @@ def run_job(job: Path, max_pages: int = 500):
     groups = {mode: 'ready' if all(n in available for n in names) else 'partial' if any(n in available for n in names) else 'failed'
               for mode, names in expected.items()}
     status = ('completed_with_warnings' if errors or warnings or any(s != 'ready' for s in groups.values()) else 'completed') if available else 'failed'
-    report = {'status': status, 'selected_pages': selected, 'outputs': groups, 'warnings': warnings, 'errors': errors,
-              'page_issues': page_issues,
+    diagnostics = public_diagnostics(translation_result, selected, work)
+    report = {'status': status, 'selected_pages': selected, 'outputs': groups, 'warnings': list(dict.fromkeys(warnings)), 'errors': errors,
+              **diagnostics, 'product_qa': product_qa,
               'visual_review': 'not_performed', 'note': 'Automatic completion does not certify visual or semantic perfection.'}
     write_json(artifacts / 'report.json', report)
     update(job, status=status, stage='finished', finished_at=now(), artifacts=collect_artifacts(job),

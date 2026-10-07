@@ -103,7 +103,8 @@ def test_corrupt_candidate_file_does_not_hide_valid_ledger(tmp_path):
     from test_best_effort import sample
     source,doc=sample(tmp_path);cfg=Settings()
     (tmp_path/'translation-candidates.json').write_text('broken')
-    write_json(tmp_path/'translation-ledger.json',{'source_sha256':doc.source_sha256,'config_fingerprint':cfg.fingerprint(),'translations':{'a':'已完成内容'}})
+    write_json(tmp_path/'translation-ledger.json',{'source_sha256':doc.source_sha256,'config_fingerprint':cfg.fingerprint(),
+               'translations':{'a':'已完成内容'},'target_sources':{'a':doc.pages[0].regions[0].source},'target_source_literals':{'a':'Voltage 5'}})
     with pytest.warns(RuntimeWarning):assert retained_values(tmp_path,doc,cfg)=={'a':'已完成内容'}
 
 
@@ -220,7 +221,7 @@ def test_one_bad_placement_keeps_artwork_and_other_translations(tmp_path,monkeyp
     with fitz.open(source) as src,fitz.open(out) as result:
         assert len(result)==2
         assert '正常标题' in result[1].get_text()
-        assert 'Failing label' not in result[1].get_text()
+        assert 'Failing label' in result[1].get_text()
         assert result[1].rect==src[0].rect
         assert all(text not in result[1].get_text() for text in ('局部排版待检查','原位置',bad))
         clip=fitz.Rect(310,140,440,240)

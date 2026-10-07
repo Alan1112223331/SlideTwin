@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from html import escape
+from html import escape, unescape
 from pathlib import Path
 import statistics
 import re
@@ -14,6 +14,9 @@ from .extract import restore, immutable_math_label, native_lines, native_bullet,
 from .models import Document, Region, write_json
 from .protocol import aligned_phrase
 from .raster import raster_container
+from .decorations import source_decorations
+from .font_unicode import repair_story_font_unicode
+from .math_text import readable_math
 
 
 class LayoutError(RuntimeError):
@@ -46,11 +49,22 @@ class Placement:
     raster_patch_box: list[float] | None = None
     background_box: list[float] | None = None
     rotate: int = 0
+    line_height: float | None = None
+    decorations: list[dict] | None = None
 
 
 def intersects(a: fitz.Rect, b: fitz.Rect, epsilon=0.1) -> bool:
     c = a & b
     return not c.is_empty and c.width > epsilon and c.height > epsilon
+
+
+def owned_center(center, owners) -> bool:
+    # PDF font metrics can differ by a few thousandths of a point after cache
+    # serialization. Quantization boundaries must not turn our own glyph into
+    # an obstacle. This tolerance is much smaller than any physical glyph.
+    x,y=center
+    return any((round(x+dx,2),round(y+dy,2)) in owners
+               for dx in (-.02,-.01,0,.01,.02) for dy in (-.02,-.01,0,.01,.02))
 
 
 def unicode_font() -> Path | None:
@@ -65,12 +79,20 @@ def extended_font() -> Path | None:
     return None
 
 
+def math_font() -> Path | None:
+    for name in ['C:/Windows/Fonts/DejaVuMathTeXGyre.ttf',
+                 '/usr/share/fonts/truetype/dejavu/DejaVuMathTeXGyre.ttf',
+                 '/usr/share/fonts/truetype/slidetwin/NotoSansMath-Regular.ttf']:
+        if Path(name).is_file():return Path(name)
+    return None
+
+
 def content_html(text: str, size: float, color: int, bold: bool, align: str, line_height: float, html_body: str = "") -> str:
     # Story measures a lowered inline image's box without the adjacent font's
     # descender. Reserve that space in layout, so fitted text really stays inside
     # its frame instead of colliding with the next source line.
     bottom = "0.22em" if '<img ' in html_body else "0"
-    return (f'<div style="font-family:twin,latin,unicode,extended,symbols;font-size:{size:.4f}pt;color:#{color:06x};'
+    return (f'<div style="font-family:twin,latin,math,unicode,extended,symbols;font-size:{size:.4f}pt;color:#{color:06x};'
             f'font-weight:{700 if bold else 400};text-align:{align};line-height:{line_height};'
             f'white-space:normal;margin:0;padding:0 0 {bottom} 0;text-indent:0;">{html_body or escape(text)}</div>')
 
@@ -87,11 +109,13 @@ def css_fonts(fonts: tuple[Path, Path]) -> tuple[str, fitz.Archive]:
     archive.add((regular.read_bytes(), "regular.ttf"))
     archive.add((bold.read_bytes(), "bold.ttf"))
     archive.add((fitz.Font("helv").buffer, "latin.cff"))
+    archive.add((fitz.Font("hebo").buffer, "latin-bold.cff"))
     archive.add((fitz.Font("symb").buffer, "symbols.cff"))
     css = ("*{box-sizing:border-box;}body{margin:0;padding:0;}"
            "@font-face{font-family:twin;src:url(regular.ttf);font-weight:400;}"
            "@font-face{font-family:twin;src:url(bold.ttf);font-weight:700;}"
-           "@font-face{font-family:latin;src:url(latin.cff);}"
+           "@font-face{font-family:latin;src:url(latin.cff);font-weight:400;}"
+           "@font-face{font-family:latin;src:url(latin-bold.cff);font-weight:700;}"
            "@font-face{font-family:symbols;src:url(symbols.cff);}")
     fallback=unicode_font()
     if fallback:
@@ -101,7 +125,147 @@ def css_fonts(fonts: tuple[Path, Path]) -> tuple[str, fitz.Archive]:
     if fallback:
         archive.add((fallback.read_bytes(),'extended.ttf'))
         css += '@font-face{font-family:extended;src:url(extended.ttf);}'
+    fallback=math_font()
+    if fallback:
+        archive.add((fallback.read_bytes(),'math.ttf'))
+        css += '@font-face{font-family:math;src:url(math.ttf);}'
     return css, archive
+
+
+def explicit_fallbacks(body: str, primary, fallback_faces) -> str:
+    """Select a registered face for missing glyphs inside mixed script runs.
+
+    Story does not reliably honor a CSS family list for a superscript adjacent
+    to an ASCII digit. This selects fonts only; all model characters stay exact.
+    """
+    families={}
+    for ch in set(re.sub(r'<[^>]*>','',body)):
+        if ch.isspace() or primary.has_glyph(ord(ch)):continue
+        face=next((name for name,font in fallback_faces if font.has_glyph(ord(ch))),None)
+        if face:families[ch]=face
+    return ''.join(part if part.startswith('<') else ''.join(
+        f'<span style="font-family:{families[ch]}">{ch}</span>' if ch in families else ch for ch in part)
+        for part in re.split(r'(<[^>]*>)',body))
+
+
+def original_asset_tokens(region: Region, value: str) -> str:
+    """Recover native style when a model copies a literal instead of its token.
+
+    Match exact characters after whitespace and known Symbol-font encodings.
+    Do not normalize superscripts, calculate equivalence, or reject model text.
+    Every repeated occurrence is retained; only its native glyph style changes.
+    """
+    def normalized(text):
+        chars=[];positions=[]
+        for index,ch in enumerate(text):
+            if not ch.isspace():chars.append(readable_math(ch));positions.append(index)
+        return ''.join(chars),positions
+    def segment(text):
+        normalized_text,positions=normalized(text);replacements=[]
+        for token,asset in sorted(region.protected_assets.items(),key=lambda x:-len(x[1].get('text',''))):
+            literal,_=normalized(asset.get('text',region.protected.get(token,'')))
+            if not literal:continue
+            for match in re.finditer(re.escape(literal),normalized_text):
+                start,end=positions[match.start()],positions[match.end()-1]+1
+                if len(literal)<3:
+                    before=text[start-1:start];after=text[end:end+1]
+                    if re.fullmatch(r'[A-Za-z0-9]',before) or re.fullmatch(r'[A-Za-z0-9]',after):continue
+                if any(start<hi and end>lo for lo,hi,_ in replacements):continue
+                replacements.append((start,end,token))
+        for start,end,token in sorted(replacements,reverse=True):text=text[:start]+token+text[end:]
+        return text
+    return ''.join(part if re.fullmatch(r'⟦P\d+⟧',part) else segment(part)
+                   for part in re.split(r'(⟦P\d+⟧)',value))
+
+
+def native_parenthesized_asset_box(region: Region, lines, images) -> tuple[fitz.Rect, float] | None:
+    """Prove that native inline assets and their brackets form one source unit.
+
+    The proof uses original character bytes, physical adjacency and glyph
+    ownership. It cannot absorb surrounding translated prose or a bracket
+    owned by a different region.
+    """
+    if not region.native or not images or not region.erase or region.direction != [1.0, 0.0]:
+        return None
+    chars=[c for line in lines for c in line['chars'] if not c['c'].isspace()]
+    owners={(round((b[0]+b[2])/2,2),round((b[1]+b[3])/2,2)) for b in region.erase}
+    center=lambda c:((c['bbox'][0]+c['bbox'][2])/2,(c['bbox'][1]+c['bbox'][3])/2)
+    owned=[c for c in chars if owned_center(center(c),owners)]
+    boxes=[fitz.Rect(image['bbox']) for image in images]
+    if any(box.is_empty or box not in fitz.Rect(region.bbox)+(-.2,-.2,.2,.2) for box in boxes):
+        return None
+    selected=[]
+    for image,box in zip(images,boxes):
+        local=sorted([c for c in owned if fitz.Point(center(c)) in box+(-.1,-.1,.1,.1)],
+                     key=lambda c:(c['bbox'][0],c['origin'][1]))
+        if ''.join(c['c'] for c in local) != re.sub(r'\s+','',image['text']):
+            return None
+        selected.extend(local)
+    if not selected:
+        return None
+    for previous,current in zip(boxes,boxes[1:]):
+        if current.x0<=previous.x0 or current.x0-previous.x1>region.size*.7:
+            return None
+    # The largest original glyph establishes the physical text baseline. A
+    # subscript's own lowered baseline must not lower the enclosing brackets.
+    largest=max(c['size'] for c in selected)
+    baseline=statistics.median(c['origin'][1] for c in selected if c['size']>=largest*.9)
+    if any(abs(image['baseline']-baseline)>region.size*.6 for image in images):
+        return None
+    box=fitz.Rect(boxes[0])
+    for item in boxes[1:]:box.include_rect(item)
+    same=[c for c in chars if abs(c['origin'][1]-baseline)<=region.size*.25]
+    left=max((c for c in same if center(c)[0]<box.x0),key=lambda c:center(c)[0],default=None)
+    right=min((c for c in same if center(c)[0]>box.x1),key=lambda c:center(c)[0],default=None)
+    if (left is None or right is None or (left['c'],right['c']) not in [('(',')'),('（','）')]
+            or not owned_center(center(left),owners) or not owned_center(center(right),owners)
+            or not -.2<=box.x0-left['bbox'][2]<=region.size*.7
+            or not -.2<=right['bbox'][0]-box.x1<=region.size*.7):
+        return None
+    literal=left['c']+''.join(c['c'] for c in sorted(selected,key=lambda c:c['bbox'][0]))+right['c']
+    if literal not in re.sub(r'\s+','',restore(region,region.source)):
+        return None
+    box.include_rect(fitz.Rect(left['bbox']));box.include_rect(fitz.Rect(right['bbox']))
+    allowed={id(c) for c in selected+[left,right]}
+    if any(id(c) not in allowed and fitz.Point(center(c)) in box for c in chars):
+        return None
+    return box,max(0,box.y1-baseline)
+
+
+def compose_native_math_parentheses(page, region, lines, body, extractable, image_sources, assets, archive, work):
+    """Rasterize a verified parenthesized source unit as one unbreakable image.
+
+    MuPDF can wrap between adjacent images despite CSS white-space:nowrap.
+    Removing exactly the composed bracket bytes from extractable_text avoids
+    claiming image-only mathematics as selectable text; prose stays intact.
+    """
+    plain=lambda value:unescape(re.sub(r'<[^>]*>','',value))
+    if not region.native or plain(body)!=extractable:
+        return body,extractable
+    changes=[]
+    for index,match in enumerate(re.finditer(r'[（(](?:\s*<img\b[^>]*>\s*)+[）)]',body)):
+        names=re.findall(r'\bsrc="([^"]+)"',match[0])
+        if not names or any(name not in image_sources for name in names):
+            continue
+        plan=native_parenthesized_asset_box(region,lines,[image_sources[name] for name in names])
+        if plan is None:
+            continue
+        box,down=plan
+        name=f'{region.id}-parenthesized-{index:03d}.png'
+        path=work/'math-assets'/name;path.parent.mkdir(parents=True,exist_ok=True)
+        page.get_pixmap(clip=box,dpi=360,alpha=True).save(path)
+        archive.add((path.read_bytes(),name));assets[name]=str(path.resolve())
+        image=f'<img src="{name}" style="width:{box.width}pt;height:{box.height}pt;vertical-align:-{down}pt;">'
+        start=len(plain(body[:match.start()]));end=start+len(plain(match[0]))
+        changes.append((match.start(),match.end(),image,start,end))
+    for lo,hi,image,start,end in reversed(changes):
+        body=body[:lo]+image+body[hi:]
+        extractable=extractable[:start]+extractable[end:]
+    if changes:
+        used=set(re.findall(r'<img\b[^>]*\bsrc="([^"]+)"',body))
+        for name in list(assets):
+            if name not in used:del assets[name]
+    return body,extractable
 
 
 def candidate_frame(region: Region, regions: list[Region], page: fitz.Page, grow=False) -> tuple[fitz.Rect, str]:
@@ -163,7 +327,20 @@ def candidate_frame(region: Region, regions: list[Region], page: fitz.Page, grow
     width = right_limit-box.x0 if grow else box.width
     if grow and not region.native and bitmap_container is None:
         width=min(width,box.width*1.35)
-    height = min(bottom_limit-box.y0, max(box.height + region.size*0.32, region.size*1.28))
+    if grow:
+        # A translated paragraph can wrap into several rows. Check the entire
+        # expanded column against source text and artwork before using that space.
+        expanded_right=box.x0+max(width,box.width)
+        obstacles=[fitz.Rect(r.bbox) for r in regions if r.id!=region.id]
+        obstacles += [fitz.Rect(w[:4]) for w in page.get_text('words')
+                      if (fitz.Rect(w[:4]).tl+fitz.Rect(w[:4]).br)/2 not in box+(-.2,-.2,.2,.2)]
+        obstacles += [b for b in graphics if not box in b+(-1,-1,1,1)]
+        for b in obstacles:
+            if b.x0<expanded_right and b.x1>box.x0 and b.y0>=box.y1-.2:
+                bottom_limit=min(bottom_limit,b.y0-1)
+    desired_height=max(box.height + region.size*.32,region.size*1.28)
+    if grow:desired_height=max(desired_height,box.height+region.size*3.5)
+    height = min(bottom_limit-box.y0, desired_height)
     frame = fitz.Rect(box.x0, box.y0-region.size*0.05, box.x0+max(width, box.width), box.y0+max(height, box.height))
     if tight_bottom is not None:frame.y1=min(frame.y1,tight_bottom)
     # Native centered headings/labels retain their original center. Source list
@@ -178,6 +355,22 @@ def candidate_frame(region: Region, regions: list[Region], page: fitz.Page, grow
             rows.append(b)
         else:
             row.include_rect(b)
+    if region.native:
+        # Font ascender boxes and raised scripts are not paragraph baselines.
+        # Determine indentation from full-size native glyphs on physical rows,
+        # so inline equations cannot turn a left-aligned body into centered text.
+        owned={(round((b[0]+b[2])/2,2),round((b[1]+b[3])/2,2)) for b in region.erase}
+        baselines=[]
+        for line in native_lines(page):
+            if abs(line.get('dir',[1,0])[0]-1)>.02:continue
+            for char in line['chars']:
+                b=fitz.Rect(char['bbox']);center=(round((b.x0+b.x1)/2,2),round((b.y0+b.y1)/2,2))
+                if not owned_center(center,owned) or char['c'].isspace() or char['size']<region.size*.85:continue
+                baseline=char['origin'][1]
+                row=next((r for r in baselines if abs(r[0]-baseline)<region.size*.2),None)
+                if row is None:baselines.append([baseline,b])
+                else:row[1].include_rect(b)
+        if len(baselines)>1:rows=[r[1] for r in baselines]
     left_aligned_rows = len(rows)>1 and max(r.x0 for r in rows)-min(r.x0 for r in rows)<max(2,region.size*0.35)
     centered_rows = len(rows)>1 and max((r.x0+r.x1)/2 for r in rows)-min((r.x0+r.x1)/2 for r in rows)<max(2,region.size*0.35)
     centered = near_center and not left_aligned_rows and (bool(containers) or centered_rows or region.role in {"title","section_header"})
@@ -465,14 +658,27 @@ def styled_html(region: Region, value: str, translations: dict, replacements: di
         phrase=translations.get(f'{region.id}_s{i}','')
         match=aligned_phrase(plain,phrase) if phrase else None
         if match is None:
+            # Literal identifiers (Q1, CMOS, etc.) have no translated spelling.
+            # Matching their exact source bytes is a style operation, not a
+            # semantic assessment of the model's sentence.
+            literal=restore(region,style.get('source','')).strip()
+            if literal and plain.count(literal)==1:match=literal
+        if match is None:
             if warnings is not None:warnings.append({'page':region.page,'id':f'{region.id}_s{i}','kind':'unmatched_emphasis','action':'Use base text style; retain model sentence unchanged'})
             continue
-        start=plain.find(match);ranges.append((start,start+len(match),style))
+        occurrences=[m.start() for m in re.finditer(re.escape(match),plain)]
+        start=next((x for x in occurrences if not any(x<hi and x+len(match)>lo for lo,hi,_ in ranges)),None)
+        if start is None:
+            if warnings is not None:warnings.append({'page':region.page,'id':f'{region.id}_s{i}',
+                                                     'kind':'unmatched_emphasis','action':'Ambiguous phrase occurrence; retain base style'})
+            continue
+        ranges.append((start,start+len(match),style))
     def wrap(body,start,end):
         for lo,hi,style in ranges:
             if start<hi and end>lo:
                 body=(f'<span style="color:#{style["color"]:06x};font-weight:{700 if style["bold"] else 400};'
-                      f'font-style:{"italic" if style["italic"] else "normal"};font-size:{style.get("size_ratio",1):.4f}em;">{body}</span>')
+                      f'font-style:{"italic" if style["italic"] else "normal"};font-size:{style.get("size_ratio",1):.4f}em;'
+                      f'text-decoration:{"underline" if style.get("underline") else "none"};">{body}</span>')
                 if style.get('break_before') and start==lo:body='<br>'+body
                 if style.get('break_after') and end==hi:body+='<br>'
         return body
@@ -485,7 +691,7 @@ def styled_html(region: Region, value: str, translations: dict, replacements: di
             boundaries=sorted({position,position+len(part)}|{x for lo,hi,_ in ranges for x in [lo,hi] if position<x<position+len(part)})
             for start,end in zip(boundaries,boundaries[1:]):out.append(wrap(escape(part[start-position:end-position]),start,end))
             position+=len(part)
-    return ''.join(out)
+    return re.sub(r'(?:<br>\s*){2,}','<br>',''.join(out))
 
 
 def build_plan(source: Path, document: Document, translations: dict[str, str], selected: list[int], layout: Layout, work: Path) -> tuple[list[Placement], list[dict]]:
@@ -496,6 +702,11 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
     fallback_fonts = [fitz.Font("helv"), fitz.Font("symb")]
     if unicode_font():fallback_fonts.append(fitz.Font(fontfile=str(unicode_font())))
     if extended_font():fallback_fonts.append(fitz.Font(fontfile=str(extended_font())))
+    if math_font():fallback_fonts.append(fitz.Font(fontfile=str(math_font())))
+    fallback_faces=[('latin',fitz.Font('helv'))]
+    for name,path in [('math',math_font()),('unicode',unicode_font()),('extended',extended_font())]:
+        if path:fallback_faces.append((name,fitz.Font(fontfile=str(path))))
+    fallback_faces.append(('symbols',fitz.Font('symb')))
     supported_rotations={r.id for p in document.pages for r in p.regions if any(abs(r.direction[0]-x)<.02 and abs(r.direction[1]-y)<.02 for x,y in [(0,-1),(-1,0),(0,1)])}
     placements, failures = [], [d for d in document.diagnostics if d.get("blocking") and d.get("page") in selected
                                and not (d.get('kind')=='rotated_text' and d.get('id') in supported_rotations)]
@@ -534,7 +745,8 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                     if region.id not in translations:
                         failures.append({"page": number, "id": region.id, "kind": "missing_translation"})
                         continue
-                    text = restore(region, translations[region.id])
+                    render_value=original_asset_tokens(region,translations[region.id])
+                    text = restore(region, render_value)
                     fixed_literal=restore(region,fixed_suffix) if fixed_suffix else None
                     if fixed_literal and text.rstrip().endswith(fixed_literal):text=text.rstrip()[:-len(fixed_literal)].rstrip()
                     compact_label=region.source.rstrip().endswith(':') and len(text)<8 and region.native
@@ -550,7 +762,7 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                             failures.append({'page':number,'id':region.id,'kind':'unsupported_text_rotation'})
                             continue
                         rotate=rotation
-                    extractable = translations[region.id]
+                    extractable = render_value
                     if fixed_suffix and extractable.rstrip().endswith(fixed_suffix):extractable=extractable.rstrip()[:-len(fixed_suffix)].rstrip()
                     if compact_label:extractable=extractable.replace('：',':')
                     if source_bullet:extractable=extractable.lstrip(source_bullet+BULLETS+'□■❑ ')
@@ -575,10 +787,14 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                                        'size_ratio':statistics.median(sizes)/region.size if sizes else 1}
                             styles.append({**style,**extra})
                         region=replace(region,inline_styles=styles)
+                    styles,decoration_plan=source_decorations(page,region,lines)
+                    region=replace(region,inline_styles=styles)
+                    warnings.extend(decoration_plan.warnings)
                     html_body = escape(extractable)
                     token_text=extractable
                     replacements={}
                     assets = {}
+                    image_sources = {}
                     for token, value in region.protected.items():
                         if token in region.protected_assets:
                             asset = region.protected_assets[token]
@@ -587,6 +803,8 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                             name = region.id + "-" + token[1:-1] + ".png"
                             path = asset_dir/name
                             box = fitz.Rect(asset["bbox"])
+                            image_literal=asset.get('text',value)
+                            image_baseline=box.y1-asset['baseline_down']
                             # An inline function and its native subscript form one
                             # atomic image; MuPDF can otherwise break at image edges
                             # even inside a CSS nowrap span.
@@ -606,18 +824,32 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                                             and trailing[1]['c']==')'):
                                         closings.append(trailing[1]);end+=1
                                     original_function=token_text[function.start():end]
+                                    image_literal=restore(region,original_function)
                                     for c in left[prefix.start():]+closings:box.include_rect(fitz.Rect(c['bbox']))
                                     token_text=token_text[:function.start()]+token+token_text[end:]
                                     extractable=extractable.replace(original_function,token,1)
                             page.get_pixmap(clip=box, dpi=360, alpha=True).save(path)
                             archive.add((path.read_bytes(), name))
                             assets[name] = str(path.resolve())
+                            image_sources[name]={'bbox':list(box),'text':image_literal,'baseline':image_baseline}
                             replacements[token]=f'<img src="{name}" style="width:{box.width}pt;height:{box.height}pt;vertical-align:-{asset["baseline_down"]}pt;">'
                             extractable = extractable.replace(token, "")
                         else:
                             replacements[token]=escape(value)
                             extractable = extractable.replace(token, value)
                     html_body=styled_html(region,token_text,translations,replacements,warnings)
+                    if decoration_plan.underline:
+                        html_body='<span style="text-decoration:underline">'+html_body+'</span>'
+                    decorations=[]
+                    for decoration in decoration_plan.erasures:
+                        index=decoration.get('style_index')
+                        if index is not None:
+                            style=region.inline_styles[index];plain=restore(region,token_text)
+                            phrase=translations.get(f'{region.id}_s{index}','')
+                            literal=restore(region,style.get('source','')).strip()
+                            if not ((phrase and aligned_phrase(plain,phrase)) or (literal and plain.count(literal)==1)):
+                                continue
+                        decorations.append(decoration)
                     # Function names, an inline original variable and closing
                     # parentheses form one mathematical unit for line breaking.
                     html_body=re.sub(r'\b(?:log|exp|sin|cos|tan|softmax|sigmoid)\((?:[^<>]|<img [^>]+>){1,400}?\)[）)]?',
@@ -631,9 +863,36 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                             html_body = html_body[:-len(escaped_suffix)] + '<span style="white-space:nowrap">' + escaped_suffix + '</span>'
                     font = font_objects[int(region.bold)]
                     missing = sorted({ch for ch in extractable if not ch.isspace() and not any(f.has_glyph(ord(ch)) for f in [font, *fallback_fonts])})
+                    if missing and region.native:
+                        # Legacy Symbol fonts use private Unicode codes. Preserve
+                        # the exact original glyph instead of guessing its meaning
+                        # or abandoning an otherwise renderable paragraph.
+                        for ch in list(missing):
+                            matches=[c for line in lines for c in line['chars'] if c['c']==ch and
+                                     fitz.Point(c['origin']) in fitz.Rect(region.bbox)+(-1,-1,1,1)]
+                            if not matches:continue
+                            c=matches[0];box=fitz.Rect(c['bbox'])
+                            name=f'{region.id}-glyph-{ord(ch):x}.png'
+                            path=work/'math-assets'/name;path.parent.mkdir(parents=True,exist_ok=True)
+                            page.get_pixmap(clip=box,dpi=360,alpha=True).save(path)
+                            archive.add((path.read_bytes(),name));assets[name]=str(path.resolve())
+                            image_sources[name]={'bbox':list(box),'text':ch,'baseline':c['origin'][1]}
+                            down=max(0,box.y1-c['origin'][1])
+                            image=f'<img src="{name}" style="width:{box.width}pt;height:{box.height}pt;vertical-align:-{down}pt;">'
+                            html_body=html_body.replace(escape(ch),image)
+                            extractable=extractable.replace(ch,'');missing.remove(ch)
+                            warnings.append({'page':number,'id':region.id,'kind':'source_glyph_asset',
+                                             'characters':[ch],'action':'Preserve the original native glyph without Unicode substitution'})
                     if missing:
                         failures.append({"page": number, "id": region.id, "kind": "missing_font_glyph", "characters": missing})
                         continue
+                    html_body,extractable=compose_native_math_parentheses(
+                        page,region,lines,html_body,extractable,image_sources,assets,archive,work)
+                    # Preserve a parenthesized native mathematical asset as one
+                    # typographic unit, including adjacent legacy-symbol assets.
+                    html_body=re.sub(r'[（(](?:\s*<img [^>]+>\s*)+[）)]',
+                                     lambda m:'<span style="white-space:nowrap">'+m[0]+'</span>',html_body)
+                    html_body=explicit_fallbacks(html_body,font,fallback_faces)
                     frame, align = candidate_frame(region, regions, page)
                     if rotate and region.native:frame=fitz.Rect(region.bbox)+(-.5,-.5,.5,.5)
                     if fixed_suffix and not region.protected_assets:align='right'
@@ -676,6 +935,7 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                                         background=None
                                 except LayoutError:
                                     patch,patch_box,color=raster_label_patch(page,region,work,regions)
+                        line_height=layout.line_height
                         with fitz.open() as probe:
                             test = probe.new_page(width=page.rect.width, height=page.rect.height)
                             spare, scale = test.insert_htmlbox(frame, content_html(text, region.size, color, region.bold, align, layout.line_height, html_body),
@@ -693,16 +953,27 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                                 if grown_spare >= 0 and (spare < 0 or grown_scale > scale or (orphan and not has_orphan_cjk_line(test))):
                                     frame, align, spare, scale = grown, grown_align, grown_spare, grown_scale
                                     glyph_boxes = [list(w[:4]) for w in test.get_text("words")]
+                        if spare < 0 and line_height>1:
+                            # Tight diagram rows can have a pitch smaller than
+                            # the document-wide paragraph leading. Retry layout
+                            # locally at a full-em pitch; no model request.
+                            with fitz.open() as probe:
+                                test=probe.new_page(width=page.rect.width,height=page.rect.height)
+                                compact_spare,compact_scale=test.insert_htmlbox(frame,content_html(text,region.size,color,region.bold,align,1,html_body),
+                                                                               css=css,archive=archive,scale_low=layout.min_font_scale,rotate=rotate)
+                                if compact_spare>=0:
+                                    spare,scale,line_height=compact_spare,compact_scale,1
+                                    glyph_boxes=[list(w[:4]) for w in test.get_text('words')]
                         if spare < 0:
                             raise LayoutError("Translation cannot fit above minimum readable font scale")
                         if any(fitz.Rect(b) not in frame + (-0.75, -0.75, 0.75, 0.75) for b in glyph_boxes):
                             raise LayoutError("Rendered glyph extends beyond its allocated text area")
                         placements.append(Placement(region.id, number, text, list(frame), region.bbox, region.size, scale, align,
                                                     region.bold, color, region.native, region.erase, background, html_body, assets, extractable, glyph_boxes,
-                                                    raster_patch=patch,raster_patch_box=patch_box,background_box=background_box,rotate=rotate))
+                                                    raster_patch=patch,raster_patch_box=patch_box,background_box=background_box,rotate=rotate,line_height=line_height,decorations=decorations))
                     except (LayoutError, ValueError) as exc:
                         failures.append({"page": number, "id": region.id, "kind": "layout_blocked", "reason": str(exc)})
-                except (LayoutError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                except (LayoutError, RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
                     failures.append({'page':number,'id':region.id,'kind':'region_preflight_failed','reason':str(exc)})
         for number in selected:
             placed = [p for p in placements if p.page == number]
@@ -712,7 +983,11 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                 for b in placed[i+1:]:
                     if any(intersects(fitz.Rect(x), fitz.Rect(y), epsilon=0.6) for x in (a.glyph_boxes or []) for y in (b.glyph_boxes or [])):
                         failures.append({"page": number, "kind": "translated_text_overlap", "ids": [a.id, b.id]})
-    write_json(work/"layout-plan.json", {"placements": [asdict(x) for x in placements], "failures": failures,"warnings":warnings})
+    try:
+        write_json(work/"layout-plan.json", {"placements": [asdict(x) for x in placements], "failures": failures,"warnings":warnings})
+    except OSError:
+        # Optional diagnostics must not discard the in-memory preflight plan.
+        failures.append({'kind':'layout_plan_write_failed'})
     return placements, failures
 
 
@@ -755,6 +1030,7 @@ def render(source: Path, destination: Path, placements: list[Placement], selecte
                 translated.delete_page(0)
             translated.insert_pdf(original, from_page=number-1, to_page=number-1)
             page = translated[0]
+            source_fonts={font[0] for font in page.get_fonts(full=True)}
             entries = [x for x in placements if x.page == number]
             shadows = [fitz.Rect(b) for x in entries for b in (x.shadow_boxes or [])]
             for info in page.get_images(full=True):
@@ -769,7 +1045,7 @@ def render(source: Path, destination: Path, placements: list[Placement], selecte
                     for span in line['spans']:
                         for char in span['chars']:
                             b=char['bbox'];center=(round((b[0]+b[2])/2,2),round((b[1]+b[3])/2,2))
-                            if not char['c'].isspace() and center not in owned_centers:foreign.append(fitz.Rect(b))
+                            if not char['c'].isspace() and not owned_center(center,owned_centers):foreign.append(fitz.Rect(b))
             for entry in native:
                 for box in entry.erase:
                     # Redaction removes the whole intersecting glyph. Using its
@@ -787,6 +1063,9 @@ def render(source: Path, destination: Path, placements: list[Placement], selecte
                 # Native edits never touch image pixels or vector strokes.
                 page.apply_redactions(images=0, graphics=0, text=0)
                 clear_native_bitmap_replicas(original[number-1],page,native)
+            for entry in entries:
+                for decoration in entry.decorations or []:
+                    page.draw_rect(fitz.Rect(decoration['bbox']),color=None,fill=decoration['background'],overlay=True)
             # Restore all backgrounds before ANY translated glyphs. Overlapping
             # OCR boxes must not erase a translation inserted earlier in the loop.
             for entry in entries:
@@ -818,16 +1097,19 @@ def render(source: Path, destination: Path, placements: list[Placement], selecte
                     data=io.BytesIO();composite.crop(bounds).save(data,format='PNG')
                     page.insert_image(actual,stream=data.getvalue(),overlay=True)
             for entry in entries:
-                if not entry.text and not entry.html_body:continue  # erase-only local recovery
+                if not entry.text and not entry.html_body:continue
                 for name, path in (entry.assets or {}).items():
                     archive.add((Path(path).read_bytes(), name))
                 try:
-                    spare, scale = page.insert_htmlbox(fitz.Rect(entry.frame), content_html(entry.text, entry.size, entry.color, entry.bold, entry.align, layout.line_height, entry.html_body),
+                    spare, scale = page.insert_htmlbox(fitz.Rect(entry.frame), content_html(entry.text, entry.size, entry.color, entry.bold, entry.align,entry.line_height or layout.line_height, entry.html_body),
                                                        css=css, archive=archive, scale_low=layout.min_font_scale,rotate=entry.rotate)
                 except (RuntimeError,ValueError) as exc:
                     raise LayoutError(f'Cannot insert text for {entry.id}: {exc}',entry.id) from exc
                 if spare < 0 or abs(scale-entry.scale) > 0.01:
                     raise LayoutError(f"Placement changed after preflight: {entry.id}",entry.id)
+            # Story emits >FFFF scalar hex in a PDF CMap that requires UTF-16BE.
+            # Repair only newly inserted fonts; the original page is immutable.
+            repair_story_font_unicode(translated,{font[0] for font in page.get_fonts(full=True)}-source_fonts)
             if bilingual:
                 out.insert_pdf(original, from_page=number-1, to_page=number-1)
             out.insert_pdf(translated, from_page=0, to_page=0)

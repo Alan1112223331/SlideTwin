@@ -20,6 +20,42 @@ from .budget import TokenCounter
 from .rate_limit import RollingRateLimiter
 
 
+class RequestBudget:
+    """Logical transport/retry budget; local admission consumes a separate budget."""
+
+    def __init__(self, seconds, queue_seconds=0):
+        self.remaining = float(seconds)
+        self.queue_remaining = float(queue_seconds) if queue_seconds else None
+
+    async def sleep(self, seconds):
+        if seconds >= self.remaining:
+            raise ProviderError('Model retry deadline exhausted before next attempt', kind='deadline')
+        started = time.monotonic()
+        try:
+            await asyncio.sleep(seconds)
+        finally:
+            self.remaining -= time.monotonic() - started
+
+    async def wait(self, awaitable):
+        """Count only admission time, including cancellation-safe semaphore waits."""
+        started = time.monotonic()
+        try:
+            if self.queue_remaining is None:
+                return await awaitable
+            if self.queue_remaining <= 0:
+                if hasattr(awaitable, 'close'):
+                    awaitable.close()
+                raise TimeoutError
+            async with asyncio.timeout(max(.001, self.queue_remaining)):
+                return await awaitable
+        except TimeoutError:
+            raise ProviderError('Local admission queue timeout; model request was not sent',
+                                kind='queue_timeout', retryable=False) from None
+        finally:
+            if self.queue_remaining is not None:
+                self.queue_remaining -= time.monotonic() - started
+
+
 class AsyncModelClient:
     def __init__(self, config: Provider, transport=None, trace_path: Path | None = None):
         self.config = config
@@ -84,7 +120,7 @@ class AsyncModelClient:
         if not done and reason is None:reason='length'
         return {"choices": [{"finish_reason": reason, "message": {"content": "".join(pieces)}}], "usage": usage}
 
-    async def complete(self, messages, response_format=None, *, max_output_tokens=None, expected_output_tokens=None, label=None, deadline_seconds=None):
+    async def complete(self, messages, response_format=None, *, max_output_tokens=None, expected_output_tokens=None, label=None, deadline_seconds=None, _budget=None):
         c = self.config
         c.validate_model()
         payload = {"model": c.model, "messages": messages, c.token_parameter: max_output_tokens or c.max_output_tokens,
@@ -94,27 +130,33 @@ class AsyncModelClient:
         if response_format is not None:
             payload["response_format"] = response_format
         estimated=self.counter.request(messages,response_format)+(expected_output_tokens if expected_output_tokens is not None else payload[c.token_parameter])
-        deadline=time.monotonic()+(deadline_seconds if deadline_seconds is not None else c.request_deadline_seconds)
+        budget = _budget or RequestBudget(deadline_seconds if deadline_seconds is not None else c.request_deadline_seconds,
+                                          c.queue_timeout_seconds)
         for attempt in range(c.retries):
             delay = self.cooldown_until-time.monotonic()
             if delay > 0:
-                if time.monotonic()+delay>=deadline:raise ProviderError('Request deadline cannot accommodate provider cooldown',kind='deadline')
-                await asyncio.sleep(delay)
+                await budget.sleep(delay)
             started = time.monotonic()
-            entry = {"started_at": datetime.now(timezone.utc).isoformat(), "model": c.model, "attempt": attempt+1, **(label or {})}
+            queued_at = started
+            entry = {"queued_at": datetime.now(timezone.utc).isoformat(), "model": c.model, "attempt": attempt+1, **(label or {})}
             retry_delay = 0.0
-            ticket=None;actual_tokens=None;partial=[]
+            ticket=None;actual_tokens=None;partial=[];acquired=False;sent_at=None
             try:
-                async with asyncio.timeout(max(.001,deadline-time.monotonic())), self.semaphore:
-                    ticket=await self.dispatch(estimated)
+                await budget.wait(self.semaphore.acquire())
+                acquired = True
+                ticket = await budget.wait(self.dispatch(estimated))
+                if budget.remaining <= 0:
+                    raise ProviderError('Model transport/retry deadline exhausted', kind='deadline')
+                if acquired:
                     entry['queue_seconds']=round(time.monotonic()-started,3)
                     entry['reserved_tokens']=estimated
                     entry['context_budget_tokens']=self.counter.capacity
                     entry['image_count']=sum(p.get('type')=='image_url' for m in messages if isinstance(m.get('content'),list) for p in m['content'])
                     started = time.monotonic()
+                    sent_at = started
                     entry['started_at']=datetime.now(timezone.utc).isoformat()
                     self.usage["requests"] += 1
-                    async with asyncio.timeout(c.request_deadline_seconds):
+                    async with asyncio.timeout(max(.001,budget.remaining)):
                         async with self.http.stream("POST", c.base_url.rstrip("/")+"/chat/completions", json=payload,
                                                     headers={"Authorization": "Bearer "+c.key()}) as response:
                             entry["http_status"] = response.status_code
@@ -174,7 +216,7 @@ class AsyncModelClient:
                     # missing ones. Never discard received translation text.
                     return ''.join(partial)
                 entry["status"] = "timeout"
-                if attempt+1 >= c.retries or time.monotonic()>=deadline:
+                if attempt+1 >= c.retries:
                     raise ProviderError(f"Model request exceeded its deadline or connection failed ({kind})",kind=kind) from None
                 retry_delay=min(c.retry_max_delay_seconds,c.retry_base_delay_seconds*2**attempt)*(1+random.random()*.2)
             except ProviderError as exc:
@@ -182,13 +224,19 @@ class AsyncModelClient:
                 if ''.join(partial).strip():
                     entry['status']='partial_stream_failure'
                     return ''.join(partial)
-                entry["status"] = "failed"
+                entry["status"] = "queue_timeout" if exc.kind=='queue_timeout' else "failed"
                 if not exc.retryable or attempt+1 >= c.retries:
                     raise
                 retry_delay=max(retry_delay,exc.retry_after,min(c.retry_max_delay_seconds,c.retry_base_delay_seconds*2**attempt)*(1+random.random()*.2))
             finally:
+                if sent_at is not None:
+                    budget.remaining -= time.monotonic() - sent_at
+                if acquired:self.semaphore.release()
                 if ticket is not None:await self.limiter.settle(ticket,actual_tokens)
-                entry["seconds"] = round(time.monotonic()-started, 3)
+                entry.setdefault('queue_seconds', round(time.monotonic()-queued_at,3))
+                entry['network_seconds'] = round(time.monotonic()-sent_at,3) if sent_at is not None else 0
+                entry['total_seconds'] = round(time.monotonic()-queued_at+entry.get('pool_queue_seconds',0),3)
+                entry["seconds"] = entry['network_seconds'] if sent_at is not None else entry['queue_seconds']
                 if retry_delay:entry['retry_delay_seconds']=round(retry_delay,3)
                 if self.trace_path:
                     try:
@@ -199,6 +247,5 @@ class AsyncModelClient:
                         self.trace_errors+=1
                         warnings.warn('Request timing log could not be written; model response retained',RuntimeWarning)
             if retry_delay:
-                if time.monotonic()+retry_delay>=deadline:raise ProviderError('Model retry deadline exhausted before next attempt',kind='deadline')
-                await asyncio.sleep(retry_delay)
+                await budget.sleep(retry_delay)
         raise ProviderError("Model retry limit reached")

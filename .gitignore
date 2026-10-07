@@ -40,3 +40,4 @@ output/
 !/scripts/api_client.py
 !/scripts/refresh_verified_output.py
 !/scripts/finish_async_four_courses.py
+!/scripts/collect_jobs.py

@@ -27,6 +27,7 @@ class Provider:
     extra_body: dict = field(default_factory=dict)
     concurrency: int = 8
     request_deadline_seconds: float = 1800
+    queue_timeout_seconds: float = 0
     allowed_models: list[str] = field(default_factory=list)
     tokens_per_minute: int = 0
     rate_limit_backoff_seconds: float = 60
@@ -149,7 +150,7 @@ class Settings:
             raise ValueError("Specify model and a supported protocol")
         if p.token_parameter not in {"max_tokens", "max_completion_tokens"} or p.retries < 1:
             raise ValueError("Invalid token_parameter or retries")
-        if not 0 <= p.concurrency <= 10000 or p.request_deadline_seconds <= 0:
+        if not 0 <= p.concurrency <= 10000 or p.request_deadline_seconds <= 0 or p.queue_timeout_seconds < 0:
             raise ValueError("Invalid concurrency or request deadline")
         if min(p.tokens_per_minute,p.requests_per_minute,p.rate_limit_backoff_seconds) < 0:
             raise ValueError('Invalid provider rate limits')
@@ -177,7 +178,7 @@ class Settings:
         data["provider"].pop("api_key_file")
         data["provider"].pop("api_key_env")
         for key in ('primary_attempts','retry_base_delay_seconds','retry_max_delay_seconds'):data['provider'].pop(key,None)
-        for key in ("concurrency", "request_deadline_seconds", "timeout_seconds", "retries", "stream", "allowed_models", "tokens_per_minute", "rate_limit_backoff_seconds", "requests_per_minute", "token_rate_utilization", "read_timeout_seconds", "connect_timeout_seconds", "fallback_cooldown_seconds", "rate_limit_source"):
+        for key in ("concurrency", "request_deadline_seconds", "queue_timeout_seconds", "timeout_seconds", "retries", "stream", "allowed_models", "tokens_per_minute", "rate_limit_backoff_seconds", "requests_per_minute", "token_rate_utilization", "read_timeout_seconds", "connect_timeout_seconds", "fallback_cooldown_seconds", "rate_limit_source"):
             data["provider"].pop(key, None)
         if not data['provider']['worker_models']:data['provider'].pop('worker_models')
         if not data['translation']['preserve_terms']:data['translation'].pop('preserve_terms')

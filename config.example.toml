@@ -18,6 +18,8 @@ retry_max_delay_seconds = 15
 read_timeout_seconds = 120
 connect_timeout_seconds = 10
 request_deadline_seconds = 1800
+# Admission waits do not consume the HTTP/retry budget; 0 defers to job timeout.
+queue_timeout_seconds = 0
 fallback_cooldown_seconds = 120
 rate_limit_backoff_seconds = 60
 # 0: auto concurrency up to RPM; until quota is known, bootstrap with 8 slots.

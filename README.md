@@ -71,10 +71,13 @@ primary_attempts = 2            # 普通瞬时错误优先在主模型尝试的�
 retry_base_delay_seconds = 1
 retry_max_delay_seconds = 15
 read_timeout_seconds = 120      # 等待响应头或连续无响应数据的超时
-request_deadline_seconds = 1800 # 单次逻辑调用的总时限，包含队列、重试与退避
+request_deadline_seconds = 1800 # 实际 HTTP 调用加重试/退避的总预算，不含本地限流和槽位等待
+queue_timeout_seconds = 0      # 独立的本地排队预算；0 不额外限制，仍受整个任务总超时约束
 ```
 
 请在 `config.local.toml` 填写服务控制台的实际 RPM 和 TPM。示例配置中的 0 表示额度尚未填写；程序不会通过 `/v1/models` 猜测账户额度。也可设 `concurrency = 8` 限制连接数。
+
+主模型和 fallback 共用限流记录，切换模型不会增加本项目的配额。排队超时记为 `queue_timeout`，请求尚未发出时不作模型失败重试；日志分开记录槽位等待、限流等待和实际网络耗时。
 
 硅基流动的额度按账户、按模型设置，付费模型随账户等级变化，见 [官方限流说明](https://api-docs.siliconflow.cn/docs/userguide/faqs/rate-limit-and-upgradation)。限流器维护当前共享客户端的记录，无法知道其他应用的用量。不要启动多个独立进程叠加额度。
 
@@ -125,7 +128,7 @@ image_neighbors = 0
 
 ## 输出与失败交付
 
-重试耗尽后仍在 `--out` 输出完整选中页的译稿，使用已有模型内容，不以原文替代已经取得的译文。确实没有取得内容才标“未取得译文”。**单块排版失败不触发整页纯文字重排**：成功放置的译文和原页图形保留，所有页面保持原尺寸；成品 PDF 不附加“局部排版待检查”、内部编号、坐标或页底补充区域。放不下的译文完整保存在同名 `.issues.json` 的 `pages[].unplaced_translations` 中，不表示已在 PDF 内成功放置。问题报告保留警告状态，旧输出先备份再原子替换。如果某个 OCR 图中文字无法安全擦除，会记录 `source_pixels_retained`，对应译文仍保留在问题报告中。Docker API 的 `report.json` 通过 `page_issues` 提供这些未放置译文；中文和中英 JSON / Markdown 也保留已获得的译文。
+重试耗尽后仍在 `--out` 输出完整选中页的译稿，保留已有模型内容；确实没有取得内容才标“未取得译文”。**单块排版失败不触发整页纯文字重排**：成功放置的译文和原页图形保留，所有页面保持原尺寸；成品 PDF 不附加“局部排版待检查”、内部编号、坐标或页底补充区域。程序先尝试在已验证的空白区域扩展文字框、调整行距及选择覆盖所需字形的字体，再提交替换。如果某个原生或 OCR 文本仍无法安全替换，只回滚该块，记录 `source_pixels_retained`，不会先擦除原文再留下空白。放不下的译文完整保存在同名 `.issues.json` 的 `pages[].unplaced_translations` 中，不表示已在 PDF 内成功放置。问题报告保留警告状态，旧输出先备份再原子替换。Docker API 的 `report.json` 通过 `page_issues` 提供这些未放置译文；中文和中英 JSON / Markdown 也保留已获得的译文。
 
 | 故障 | 0.3.1 处理范围 |
 | --- | --- |
@@ -157,6 +160,8 @@ image_neighbors = 0
 | `layout-plan.json` | 字体、位置、排版警告 |
 | `qa.json` / `run.json` | 程序检查与状态 |
 | `preview/pair-*.png` | 原文/译文对照图 |
+
+Docker 批任务可用 `scripts/collect_jobs.py start --run-dir output/my-run --env-file .env --container slidetwin-slidetwin-1` 在独立后台进程中收集结果。supervisor 恢复退出的收集器，续补日志和校验产物，不重新提交翻译任务。用 `scripts/collect_jobs.py status --run-dir output/my-run` 按当前心跳判断是否失联；`summary.json` 的历史 `running` 状态不能独自证明存活。完整命令、清单格式及状态说明见 [后台收集工具](docs/collector.md)。
 
 ## 安装与测试
 

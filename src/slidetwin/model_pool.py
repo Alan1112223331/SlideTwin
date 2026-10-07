@@ -5,7 +5,7 @@ import random
 import time
 import warnings
 
-from .async_client import AsyncModelClient
+from .async_client import AsyncModelClient, RequestBudget
 from .client import ProviderError
 
 
@@ -21,6 +21,10 @@ class AsyncModelPool:
             provider=copy.deepcopy(config);provider.model=model;provider.worker_models=[];provider.fallback_models=[];provider.retries=1
             if 'Qwen3-VL' in model or 'Qwen3-Omni' in model:provider.extra_body.pop('enable_thinking',None)
             self.clients.append(AsyncModelClient(provider,transport,trace_path))
+        # Primary and fallbacks use the same account quota. Switching models
+        # must not create a fresh RPM/TPM allowance for the same minute.
+        for client in self.clients[1:]:
+            client.limiter = self.clients[0].limiter
 
     @property
     def usage(self):
@@ -39,26 +43,28 @@ class AsyncModelPool:
 
     async def complete(self,messages,response_format=None,**kwargs):
         attempts=[0]*len(self.clients);last_error=None;backoff=0.
-        deadline=time.monotonic()+self.config.request_deadline_seconds
+        kwargs=dict(kwargs)
+        budget=RequestBudget(kwargs.pop('deadline_seconds',self.config.request_deadline_seconds),
+                             self.config.queue_timeout_seconds)
         for attempt in range(self.config.retries):
             if backoff:
-                if time.monotonic()+backoff>=deadline:
-                    raise ProviderError('Logical request retry deadline exhausted',kind='deadline') from last_error
-                await asyncio.sleep(backoff)
+                await budget.sleep(backoff)
             while True:
                 # Model health is checked after acquiring a slot. Cooldowns and
                 # retry sleeps happen outside that slot so unrelated work runs.
-                async with self.semaphore:
+                queue_started=time.monotonic()
+                await budget.wait(self.semaphore.acquire())
+                try:
                     index=self.choose(attempts)
                     wait=max(0.,self.unavailable_until[index]-time.monotonic())
-                    remaining=deadline-time.monotonic()
-                    if remaining<=wait:
+                    if budget.remaining<=wait:
                         raise ProviderError('Logical request deadline cannot accommodate provider cooldown',kind='deadline') from last_error
                     if not wait:
                         call_kwargs=dict(kwargs)
-                        call_kwargs['deadline_seconds']=remaining
+                        call_kwargs['_budget']=budget
                         call_kwargs['label']={**(kwargs.get('label') or {}),'pool_attempt':attempt+1,
                             'fallback':index!=0,'retry_wait_seconds':round(backoff,3),
+                            'pool_queue_seconds':round(time.monotonic()-queue_started,3),
                             'previous_error_kind':last_error.kind if last_error else None}
                         attempts[index]+=1
                         try:
@@ -79,9 +85,11 @@ class AsyncModelPool:
                             if attempt+1>=self.config.retries:raise
                             backoff=min(self.config.retry_max_delay_seconds,self.config.retry_base_delay_seconds*2**attempt)*(1+random.random()*.2)
                         break
+                finally:
+                    self.semaphore.release()
                 # Every model is cooling down. Release the concurrency slot and
                 # respect the server's delay rather than truncating Retry-After.
-                await asyncio.sleep(wait)
+                await budget.sleep(wait)
         raise last_error or ProviderError('Model retry limit reached')
 
     async def close(self):

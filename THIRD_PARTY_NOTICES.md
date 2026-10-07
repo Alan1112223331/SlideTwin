@@ -27,12 +27,18 @@ separate licenses; consult their respective model repositories.
 The Docker build downloads Noto Sans SC from Google Fonts at commit
 `a85815a42757630ce188fdad368c2dfc444d4773`, verifies SHA-256 digests, instantiates
 regular and bold static fonts, and removes duplicate compatibility-character
-aliases from Unicode mappings. These modified font files remain under the
+aliases from Unicode mappings. It also disables ten unmapped ASCII-digit
+localization substitutions and duplicates identical hyphen outlines for unique
+Unicode alias maps, preserving the other shaping features. These modified font files remain under the
 SIL Open Font License 1.1, with upstream copyright notices retained.
 
 - Source and OFL text: https://github.com/google/fonts/tree/a85815a42757630ce188fdad368c2dfc444d4773/ofl/notosanssc
 - Reproduction script: `docker-fonts.py`
 - Installed font license: `/usr/share/fonts/truetype/slidetwin/OFL.txt`
+
+The Docker image installs Debian's `fonts-dejavu-extra` package for
+`DejaVuMathTeXGyre.ttf` mathematical glyph coverage. Its package copyright and
+license notices are retained at `/usr/share/doc/fonts-dejavu-extra/copyright`.
 
 ## Other dependencies
 

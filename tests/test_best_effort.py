@@ -22,7 +22,7 @@ def sample(tmp_path):
 def test_export_keeps_rejected_translation_and_replaces_output_with_backup(tmp_path):
     source,doc=sample(tmp_path);cfg=Settings();work=tmp_path/'work';work.mkdir()
     write_json(work/'translation-candidates.json',{'source_sha256':doc.source_sha256,'config_fingerprint':cfg.fingerprint(),
-               'targets':{'a':{'text':'电压为 6'}}})
+               'targets':{'a':{'text':'电压为 6','source':doc.pages[0].regions[0].source,'source_literal':'Voltage 5'}}})
     output=tmp_path/'output.pdf';output.write_bytes(b'previous-output')
     before=source.read_bytes()
     report=publish_best_effort(source,output,work,doc,[1],cfg,'Number validation failed',preview=False)
@@ -50,7 +50,7 @@ def test_failed_layout_keeps_slide_size_and_retains_model_text_in_sidecar(tmp_pa
     with fitz.open(out) as pdf:
         assert len(pdf)==2
         assert pdf[0].rect==pdf[1].rect==fitz.Rect(0,0,400,250)
-        assert 'Voltage 5' not in pdf[1].get_text()
+        assert 'Voltage 5' in pdf[1].get_text()
         assert all(value not in pdf[1].get_text() for value in ('局部排版待检查','原位置','这是模型'))
 
 
@@ -90,7 +90,7 @@ def test_pipeline_exports_after_retry_limit_without_hiding_unvalidated_text(tmp_
     class Failing:
         def __init__(self,*a,**k):pass
         async def run_async(self,*a,**k):
-            write_json(work/'translation-candidates.json',{'source_sha256':doc.source_sha256,'config_fingerprint':cfg.fingerprint(),'targets':{'a':{'text':'电压为 6'}}})
+            write_json(work/'translation-candidates.json',{'source_sha256':doc.source_sha256,'config_fingerprint':cfg.fingerprint(),'targets':{'a':{'text':'电压为 6','source':doc.pages[0].regions[0].source,'source_literal':'Voltage 5'}}})
             raise ProtocolError('Retries exhausted')
     monkeypatch.setattr(pipeline,'AsyncTranslator',Failing)
     report=pipeline.run(source,out,work,cfg,preview=False)
