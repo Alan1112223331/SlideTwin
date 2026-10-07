@@ -1,7 +1,7 @@
 services:
   slidetwin:
     build: .
-    image: slidetwin:0.4.1
+    image: slidetwin:0.4.2
     init: true
     restart: "no"
     ports:

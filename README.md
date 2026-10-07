@@ -1,8 +1,8 @@
 # SlideTwin
 
-基于 Docling 和 OpenAI 兼容 Chat Completions 接口的课件 PDF 翻译程序，当前版本 **0.4.1**。支持中文译稿、中英对照 PDF 和 Docling 原始提取结果；当前支持 PDF，原生 PPTX 编辑尚未实现。
+基于 Docling 和 OpenAI 兼容 Chat Completions 接口的课件 PDF 翻译程序，当前版本 **0.4.2**。支持中文译稿、中英对照 PDF 和 Docling 原始提取结果；当前支持 PDF，原生 PPTX 编辑尚未实现。
 
-本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。当前 GitHub 发布标签为 [`release0.1.2`](https://github.com/Alan1112223331/SlideTwin/releases/tag/release0.1.2)，对应程序 0.4.1；`release0.1.1` 对应程序 0.4.0，首次发布标签 `release0.1` 保留程序 0.3.2 的快照。
+本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。当前 GitHub 发布标签为 [`release0.1.3`](https://github.com/Alan1112223331/SlideTwin/releases/tag/release0.1.3)，对应程序 0.4.2；`release0.1.2` 对应程序 0.4.1，`release0.1.1` 对应程序 0.4.0，首次发布标签 `release0.1` 保留程序 0.3.2 的快照。
 
 ## Docker 与 HTTP API
 

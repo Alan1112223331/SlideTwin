@@ -1,6 +1,6 @@
 # Docker 部署与 HTTP API
 
-本服务接收 PDF，异步生成中文、中英对照和 Docling 原始提取结果。镜像使用 Linux CPU、Python 3.12，自带中文字体和 Poppler；无需在宿主机安装 Docling。当前镜像标签为 `slidetwin:0.4.1`，通过本项目 Dockerfile 本地构建。
+本服务接收 PDF，异步生成中文、中英对照和 Docling 原始提取结果。镜像使用 Linux CPU、Python 3.12，自带中文字体和 Poppler；无需在宿主机安装 Docling。当前镜像标签为 `slidetwin:0.4.2`，通过本项目 Dockerfile 本地构建。
 
 ## 启动
 
