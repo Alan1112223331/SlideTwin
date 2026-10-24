@@ -3,6 +3,7 @@ import re
 import numpy as np
 import pymupdf as fitz
 from .models import digest,write_json
+from .raster import clipped_pixmap
 
 def supplement(page,descriptors,work):
     import json
@@ -10,7 +11,8 @@ def supplement(page,descriptors,work):
     anchors={'what','if','when','where','for','every','time','violation','delay','setup','hold','given','assume','therefore'}
     for descriptor in descriptors:
         if descriptor['role']!='formula' or len(page.get_textbox(descriptor['bbox']).strip())>=3:continue
-        pix=page.get_pixmap(matrix=fitz.Matrix(2,2),clip=descriptor['bbox'],alpha=False)
+        pix=clipped_pixmap(page,descriptor['bbox'],scale=2)
+        if pix is None:continue
         key=digest(pix.samples+'formula-prose-v2'.encode());path=work/'formula-ocr'/f'{key}.json'
         if path.exists():rows=json.loads(path.read_text(encoding='utf-8'))['rows']
         else:

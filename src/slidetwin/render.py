@@ -13,7 +13,7 @@ from .config import Layout
 from .extract import restore, immutable_math_label, native_lines, native_bullet, BULLETS
 from .models import Document, Region, write_json
 from .protocol import aligned_phrase
-from .raster import raster_container
+from .raster import raster_container, visible_clip, clipped_pixmap
 from .decorations import source_decorations
 from .font_unicode import repair_story_font_unicode
 from .math_text import readable_math
@@ -386,7 +386,9 @@ def candidate_frame(region: Region, regions: list[Region], page: fitz.Page, grow
 
 
 def raster_background(page: fitz.Page, box: fitz.Rect) -> list[float]:
-    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=box + (-1, -1, 1, 1), alpha=False)
+    pix = clipped_pixmap(page, box, scale=2, padding=1)
+    if pix is None:
+        raise LayoutError("OCR background has no rasterizable page area")
     a = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[:, :, :3].astype(float)
     border = np.concatenate([a[:2].reshape(-1, 3), a[-2:].reshape(-1, 3), a[:, :2].reshape(-1, 3), a[:, -2:].reshape(-1, 3)])
     bg = np.median(border, axis=0)
@@ -407,7 +409,8 @@ def symbolic_quantity(text: str) -> bool:
 def visible_native_ink(page: fitz.Page,region: Region) -> bool:
     """Do not expose template text hidden behind an opaque source shape."""
     scale=4
-    pix=page.get_pixmap(matrix=fitz.Matrix(scale,scale),clip=fitz.Rect(region.bbox),alpha=False)
+    pix=clipped_pixmap(page,region.bbox,scale=scale)
+    if pix is None:return False
     import cv2
     a=np.frombuffer(pix.samples,np.uint8).reshape(pix.height,pix.width,pix.n)[:,:,:3].astype(float)
     colors=[region.color]+[s['color'] for s in region.inline_styles]
@@ -473,7 +476,9 @@ def raster_typography(page: fitz.Page,region: Region) -> tuple[Region,int,bool]:
     """
     import cv2
     box=fitz.Rect(region.bbox);scale=4
-    pix=page.get_pixmap(matrix=fitz.Matrix(scale,scale),clip=box+(-1,-1,1,1),alpha=False)
+    pix=clipped_pixmap(page,region.bbox,scale=scale,padding=1)
+    if pix is None:
+        raise LayoutError('OCR region has no rasterizable page area',region.id)
     a=np.frombuffer(pix.samples,np.uint8).reshape(pix.height,pix.width,pix.n)[:,:,:3]
     border=np.concatenate([a[0],a[-1],a[:,0],a[:,-1]])
     bg=np.median(border,axis=0)
@@ -547,7 +552,9 @@ def raster_label_patch(page: fitz.Page, region: Region, work: Path, neighbors: l
     box=fitz.Rect(region.bbox)
     padding=max(5,min(12,region.size*1.5))
     crop=(box+(-padding,-padding,padding,padding)) & page.rect
-    pix=page.get_pixmap(matrix=fitz.Matrix(scale,scale),clip=crop,alpha=False)
+    pix=clipped_pixmap(page,region.bbox,scale=scale,padding=padding)
+    if pix is None:
+        raise LayoutError('OCR label has no rasterizable page area',region.id)
     pixels=np.frombuffer(pix.samples,np.uint8).reshape(pix.height,pix.width,pix.n)[:,:,:3].copy()
     gray=cv2.cvtColor(pixels,cv2.COLOR_RGB2GRAY)
     border=np.concatenate([pixels[:5].reshape(-1,3),pixels[-5:].reshape(-1,3),pixels[:,:5].reshape(-1,3),pixels[:,-5:].reshape(-1,3)])
@@ -714,7 +721,10 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
     with fitz.open(source) as src:
         for number in selected:
             page = src[number-1]
-            regions = document.pages[number-1].regions
+            # PPT exports and old extraction caches can contain objects beyond
+            # the slide canvas. They are neither visible content nor obstacles.
+            # Keep partially visible objects and let rasterization clip them.
+            regions = [r for r in document.pages[number-1].regions if visible_clip(page,r.bbox) is not None]
             lines=native_lines(page)
             for region in regions:
                 try:
@@ -1006,8 +1016,9 @@ def clear_native_bitmap_replicas(source_page,edited_page,entries):
         if any((fitz.Rect(w[:4]) & box).get_area()>1 for w in edited_page.get_text('words')):continue
         try:bg=np.array(raster_background(edited_page,box))*255
         except LayoutError:continue
-        before=source_page.get_pixmap(matrix=fitz.Matrix(3,3),clip=box,alpha=False)
-        after=edited_page.get_pixmap(matrix=fitz.Matrix(3,3),clip=box,alpha=False)
+        before=clipped_pixmap(source_page,box,scale=3)
+        after=clipped_pixmap(edited_page,box,scale=3)
+        if before is None or after is None or (before.width,before.height)!=(after.width,after.height):continue
         a=np.frombuffer(before.samples,np.uint8).reshape(before.height,before.width,before.n)[:,:,:3].astype(float)
         b=np.frombuffer(after.samples,np.uint8).reshape(after.height,after.width,after.n)[:,:,:3].astype(float)
         color=np.array([(entry.color>>16)&255,(entry.color>>8)&255,entry.color&255])

@@ -7,11 +7,14 @@ import numpy as np
 import pymupdf as fitz
 
 from .models import digest, write_json
+from .raster import clipped_pixmap
 
 
 def recognize(page, box, work):
     scale = 2.5
-    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=box, alpha=False)
+    pix = clipped_pixmap(page, box, scale=scale)
+    if pix is None:
+        return []
     key = digest(pix.samples + str((pix.x, pix.y)).encode() + b'precise-labels-v1')
     path = Path(work) / 'label-ocr' / f'{key}.json'
     if path.exists():
@@ -38,7 +41,9 @@ def caption_body_box(page, box):
     """Keep a filled blue figure-number badge and its horizontal rule intact."""
     import cv2
     scale = 3
-    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=box + (-2, -2, 2, 2), alpha=False)
+    pix = clipped_pixmap(page, box, scale=scale, padding=2)
+    if pix is None:
+        return None
     rgb = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)[:, :, :3].astype(np.int16)
     blue = ((rgb[:, :, 2] - rgb[:, :, 0] > 35) & (rgb[:, :, 1] - rgb[:, :, 0] > 25) & (rgb[:, :, 0] < 160)).astype(np.uint8)
     original_blue=blue.copy()
