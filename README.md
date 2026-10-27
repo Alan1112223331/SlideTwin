@@ -1,8 +1,8 @@
 # SlideTwin
 
-基于 Docling 和 OpenAI 兼容 Chat Completions 接口的课件 PDF 翻译程序，当前版本 **0.4.2**。支持中文译稿、中英对照 PDF 和 Docling 原始提取结果；当前支持 PDF，原生 PPTX 编辑尚未实现。
+基于 Docling 和 OpenAI 兼容 Chat Completions 接口的课件 PDF 翻译程序，当前版本 **0.4.3**。支持中文译稿、中英对照 PDF 和 Docling 原始提取结果；当前支持 PDF，原生 PPTX 编辑尚未实现。
 
-本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。当前 GitHub 发布标签为 [`release0.1.3`](https://github.com/Alan1112223331/SlideTwin/releases/tag/release0.1.3)，对应程序 0.4.2；`release0.1.2` 对应程序 0.4.1，`release0.1.1` 对应程序 0.4.0，首次发布标签 `release0.1` 保留程序 0.3.2 的快照。
+本项目独立管理环境、配置、缓存、测试与输出，不修改原课件。真实凭据、课件和运行产物不进入版本管理。当前 GitHub 发布标签为 [`release0.1.4`](https://github.com/Alan1112223331/SlideTwin/releases/tag/release0.1.4)，对应程序 0.4.3；`release0.1.3` 对应程序 0.4.2，`release0.1.2` 对应程序 0.4.1，`release0.1.1` 对应程序 0.4.0，首次发布标签 `release0.1` 保留程序 0.3.2 的快照。
 
 ## Docker 与 HTTP API
 
@@ -29,7 +29,7 @@
 
 当前主分支已修复带 90°/180°/270° 旋转标记的 PDF 坐标混用：在内存副本中统一提取和排版坐标，保留原文件与双语原文页。提取缓存版本为 35，旧坐标会自动重建，已校验的 Docling 原始结果仍可复用。同时固定使用 PyMuPDF 2.0，修复旧库擦除文字时留下错位字母的问题，并统一其附加组件可能改变的字形边界设置。
 
-此修复尚不在 `release0.1.3` 附件中。命令行部署更新源码后重新执行 `python -m pip install -e ".[server]"`；Docker 部署更新源码后执行 `docker compose up -d --build --force-recreate`，再重试任务。仅重启旧容器不会更新程序或依赖。Compose 仍为 `restart: "no"`，不会随 Docker 自动启动。
+上述修复已纳入 `release0.1.4`。从旧版升级时，命令行部署更新源码后重新执行 `python -m pip install -e ".[server]"`；Docker 部署更新源码后执行 `docker compose build`，需要服务时再执行 `docker compose up -d --no-build --force-recreate`。仅重启旧容器不会更新程序或依赖。Compose 仍为 `restart: "no"`，不会随 Docker 自动启动。
 
 ## 模型与程序的边界
 
