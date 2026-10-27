@@ -11,9 +11,10 @@ import pymupdf as fitz
 
 from .models import Document, Page, Region, digest, write_json, read_cache
 from .raster import raster_container
+from .geometry import normalize_page_rotations, configure_text_geometry
 
 
-EXTRACT_VERSION = "34"
+EXTRACT_VERSION = "35"
 BULLETS = "•●▪◦‣–➢\uf0b7\uf0a7\uf071\uf06d✓✔☑❑"
 MATH_FONT = re.compile(r"symbol|math|cmmi|cmsy|cmex|mtextra|(?:r?ntx|rtx)(?:b?mi|sy|ex)|txsy|txex|ntxsups", re.I)
 NUMBERS = re.compile(r"(?<![\w⟦])\d+(?:[.,]\d+)*(?:%|[⁰¹²³⁴⁵⁶⁷⁸⁹])?(?![\w⟧])")
@@ -357,6 +358,7 @@ def inline_styles(chars: list[dict], base: tuple) -> list[dict]:
 
 
 def native_lines(page: fitz.Page) -> list[dict]:
+    configure_text_geometry()
     lines = []
     for block in page.get_text("rawdict")["blocks"]:
         for line in block.get("lines", []):
@@ -842,7 +844,7 @@ def enrich_page(page: fitz.Page, number: int, descriptors: list[dict], preserved
 def extract(source: Path, work: Path, selected: list[int] | None = None, force=False, log=print) -> Document:
     sha = digest(source.read_bytes())
     work.mkdir(parents=True, exist_ok=True)
-    fitz.TOOLS.set_small_glyph_heights(True)
+    configure_text_geometry()
     with fitz.open(source) as original:
         selected = selected or list(range(1, len(original)+1))
         if len(set(selected)) != len(selected) or any(p < 1 or p > len(original) for p in selected):
@@ -901,6 +903,10 @@ def extract(source: Path, work: Path, selected: list[int] | None = None, force=F
         else:
             log("Reusing Docling object tree; refreshing native geometry and protected content")
         raw = read_cache(raw_path)
+        # Docling sees the displayed slide. Align all native glyphs, drawings,
+        # OCR crops and page bounds with that same coordinate space. The raw
+        # Docling input/output and the original file stay untouched.
+        normalize_page_rotations(original)
         heights = {i+1: original[n-1].rect.height for i, n in enumerate(selected)}
         descriptors = _descriptors(raw, heights)
         selected_map = {n: i+1 for i, n in enumerate(selected)}

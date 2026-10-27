@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from queue import Queue
 
 import httpx
 import pytest
@@ -103,16 +104,24 @@ def test_failed_server_job_is_archived_and_reported_as_failed(tmp_path):
     assert summary['jobs'][0]['archive_scope'] == 'published_artifacts_only'
 
 
-def test_heartbeat_updates_while_main_collection_is_blocked(tmp_path):
+def test_heartbeat_updates_while_main_collection_is_blocked(tmp_path, monkeypatch):
     args = setup_run(tmp_path)
     monitor = collector.Collector(args)
+    saved = Queue()
+    save = monitor.save_heartbeat
+
+    def observed_save():
+        save()
+        saved.put(collector.read_json(tmp_path/'collector.json')['heartbeat_at'])
+
+    monkeypatch.setattr(monitor, 'save_heartbeat', observed_save)
     worker = threading.Thread(target=monitor.heartbeat_loop)
     worker.start()
     try:
-        time.sleep(.025)
-        first = collector.read_json(tmp_path/'collector.json')['heartbeat_at']
-        time.sleep(.025)
-        assert collector.read_json(tmp_path/'collector.json')['heartbeat_at'] > first
+        # Wait for actual durable writes. A 25 ms sleep races Windows file I/O
+        # and scheduler delays, especially during real PDF/OCR validation.
+        first = saved.get(timeout=2)
+        assert saved.get(timeout=2) > first
     finally:
         monitor.stop.set()
         worker.join()

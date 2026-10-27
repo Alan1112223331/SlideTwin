@@ -17,6 +17,7 @@ from .raster import raster_container, visible_clip, clipped_pixmap
 from .decorations import source_decorations
 from .font_unicode import repair_story_font_unicode
 from .math_text import readable_math
+from .geometry import display_pdf, normalize_page_rotations, configure_text_geometry
 
 
 class LayoutError(RuntimeError):
@@ -90,11 +91,20 @@ def math_font() -> Path | None:
 def content_html(text: str, size: float, color: int, bold: bool, align: str, line_height: float, html_body: str = "") -> str:
     # Story measures a lowered inline image's box without the adjacent font's
     # descender. Reserve that space in layout, so fitted text really stays inside
-    # its frame instead of colliding with the next source line.
-    bottom = "0.22em" if '<img ' in html_body else "0"
+    # its frame instead of colliding with the next source line. MuPDF 1.28.5
+    # ignores trailing block padding when deciding whether the story fits. A
+    # whitespace-only flow line reserves the font descender or the actual image
+    # baseline displacement, whichever is larger, without adding visible ink.
+    bottom = ''
+    if '<img ' in html_body:
+        lowered = [float(v) for v in re.findall(
+            r'<img\b[^>]*vertical-align:\s*-(\d+(?:\.\d*)?|\.\d+)pt', html_body)]
+        reserve = max(size*.22, *lowered) if lowered else size*.22
+        bottom = (f'<div style="font-size:0.1pt;line-height:{reserve:.4f}pt;'
+                  'margin:0;padding:0;">&#160;</div>')
     return (f'<div style="font-family:twin,latin,math,unicode,extended,symbols;font-size:{size:.4f}pt;color:#{color:06x};'
             f'font-weight:{700 if bold else 400};text-align:{align};line-height:{line_height};'
-            f'white-space:normal;margin:0;padding:0 0 {bottom} 0;text-indent:0;">{html_body or escape(text)}</div>')
+            f'white-space:normal;margin:0;padding:0;text-indent:0;">{html_body or escape(text)}</div>{bottom}')
 
 
 def has_orphan_cjk_line(page: fitz.Page) -> bool:
@@ -103,6 +113,7 @@ def has_orphan_cjk_line(page: fitz.Page) -> bool:
 
 
 def css_fonts(fonts: tuple[Path, Path]) -> tuple[str, fitz.Archive]:
+    configure_text_geometry()
     regular, bold = fonts
     archive = fitz.Archive()
     # Named byte entries handle non-ASCII paths and distinct font directories.
@@ -158,7 +169,12 @@ def original_asset_tokens(region: Region, value: str) -> str:
     def normalized(text):
         chars=[];positions=[]
         for index,ch in enumerate(text):
-            if not ch.isspace():chars.append(readable_math(ch));positions.append(index)
+            # Broken PDF ToUnicode maps can prepend a C0 control to an otherwise
+            # exact copied asset label. Models/JSON cleanup may omit that
+            # nonprinting byte. Compare visible characters, retaining the
+            # original glyph asset instead of typesetting its broken encoding.
+            if not ch.isspace() and ord(ch)>=32 and ord(ch)!=127:
+                chars.append(readable_math(ch));positions.append(index)
         return ''.join(chars),positions
     def segment(text):
         normalized_text,positions=normalized(text);replacements=[]
@@ -372,8 +388,18 @@ def candidate_frame(region: Region, regions: list[Region], page: fitz.Page, grow
                 else:row[1].include_rect(b)
         if len(baselines)>1:rows=[r[1] for r in baselines]
     left_aligned_rows = len(rows)>1 and max(r.x0 for r in rows)-min(r.x0 for r in rows)<max(2,region.size*0.35)
+    # A single list row can happen to span symmetrically across the page.
+    # Different-width neighboring rows sharing its left edge prove the source
+    # column's alignment even when Docling calls it ordinary text/fallback.
+    left_aligned_peers = any(
+        other.id != region.id and other.native == region.native
+        and abs(other.bbox[0]-box.x0) < max(2, region.size*.2)
+        and abs(other.size-region.size) < region.size*.15
+        and region.size*.7 < abs(other.bbox[1]-box.y0) < region.size*4
+        and abs((other.bbox[2]-other.bbox[0])-box.width) > region.size
+        for other in regions)
     centered_rows = len(rows)>1 and max((r.x0+r.x1)/2 for r in rows)-min((r.x0+r.x1)/2 for r in rows)<max(2,region.size*0.35)
-    centered = near_center and not left_aligned_rows and (bool(containers) or centered_rows or region.role in {"title","section_header"})
+    centered = near_center and not (left_aligned_rows or left_aligned_peers) and (bool(containers) or centered_rows or region.role in {"title","section_header"})
     if centered and region.role != "list_item":
         align = "center"
         half = min((frame.width)/2, (box.x0+box.x1)/2-container.x0-2, container.x1-2-(box.x0+box.x1)/2)
@@ -701,8 +727,51 @@ def styled_html(region: Region, value: str, translations: dict, replacements: di
     return re.sub(r'(?:<br>\s*){2,}','<br>',''.join(out))
 
 
+def preserve_numbered_indent(region: Region, lines, value: str) -> tuple[Region, str]:
+    """Keep a separately positioned list number and its measured hanging gap.
+
+    A physically separate source marker belongs to layout. Strip only its
+    identical prefix (or leftover punctuation when its token was omitted).
+    Prose without a marker stays verbatim. Never interpret the translated text.
+    """
+    if not region.native or region.direction != [1.0, 0.0]:
+        return region, value
+    marker = re.match(r'^((?:\d+|⟦P\d+⟧)[.)])\s+', region.source)
+    if marker is None:
+        return region, value
+    literal = restore(region, marker[1])
+    if not re.fullmatch(r'\d+[.)]', literal):
+        return region, value
+    prefix = re.match(r'^\s*(?:'+re.escape(marker[1])+'|'+re.escape(literal)+r')\s*', value)
+    if prefix is None:
+        prefix = re.match(r'^\s*'+re.escape(literal[-1])+r'\s+', value)
+    body_value = value[prefix.end():] if prefix else value
+    if (not body_value.strip() or (prefix is None and
+            re.match(r'^\s*(?:\d+|⟦P\d+⟧)[.)]', value))):
+        return region, value
+    owners = {(round((b[0]+b[2])/2, 2), round((b[1]+b[3])/2, 2)) for b in region.erase}
+    chars = [c for line in lines for c in line['chars'] if not c['c'].isspace()
+             and owned_center(((c['bbox'][0]+c['bbox'][2])/2, (c['bbox'][1]+c['bbox'][3])/2), owners)]
+    if not chars:
+        return region, value
+    baseline = min(c['origin'][1] for c in chars)
+    first = sorted((c for c in chars if abs(c['origin'][1]-baseline)<region.size*.2), key=lambda c:c['bbox'][0])
+    count = len(literal)
+    if (len(first) <= count or ''.join(c['c'] for c in first[:count]) != literal
+            or first[count]['bbox'][0]-first[count-1]['bbox'][2] < region.size*.25):
+        return region, value
+    markers = [fitz.Rect(c['bbox']) for c in first[:count]]
+    body = [b for b in region.erase if not any((fitz.Rect(b).tl+fitz.Rect(b).br)/2 in m for m in markers)]
+    if not body:
+        return region, value
+    box = fitz.Rect(body[0])
+    for b in body[1:]:
+        box.include_rect(b)
+    return replace(region, bbox=list(box), erase=body), body_value
+
+
 def build_plan(source: Path, document: Document, translations: dict[str, str], selected: list[int], layout: Layout, work: Path) -> tuple[list[Placement], list[dict]]:
-    fitz.TOOLS.set_small_glyph_heights(True)
+    configure_text_geometry()
     fonts = layout.fonts()
     css, archive = css_fonts(fonts)
     font_objects = [fitz.Font(fontfile=str(p)) for p in fonts]
@@ -719,6 +788,9 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                                and not (d.get('kind')=='rotated_text' and d.get('id') in supported_rotations)]
     warnings=[]
     with fitz.open(source) as src:
+        if document.schema_version < 2 and any(src[n-1].rotation for n in selected):
+            raise ValueError('Rotated PDF has legacy extraction coordinates; rerun extraction before rendering')
+        normalize_page_rotations(src)
         for number in selected:
             page = src[number-1]
             # PPT exports and old extraction caches can contain objects beyond
@@ -756,6 +828,9 @@ def build_plan(source: Path, document: Document, translations: dict[str, str], s
                         failures.append({"page": number, "id": region.id, "kind": "missing_translation"})
                         continue
                     render_value=original_asset_tokens(region,translations[region.id])
+                    if restore(region,render_value).strip() == restore(region,region.source).strip():
+                        continue
+                    region,render_value=preserve_numbered_indent(region,lines,render_value)
                     text = restore(region, render_value)
                     fixed_literal=restore(region,fixed_suffix) if fixed_suffix else None
                     if fixed_literal and text.rstrip().endswith(fixed_literal):text=text.rstrip()[:-len(fixed_literal)].rstrip()
@@ -1034,12 +1109,12 @@ def render(source: Path, destination: Path, placements: list[Placement], selecte
     css, archive = css_fonts(layout.fonts())
     destination.parent.mkdir(parents=True, exist_ok=True)
     # Everything was preflighted before any source content is removed.
-    with fitz.open(source) as original, fitz.open() as translated, fitz.open() as out:
+    with fitz.open(source) as original, display_pdf(source) as visual, fitz.open() as translated, fitz.open() as out:
         for index, number in enumerate(selected):
             # A fresh page copy isolates image replacement from all other pages.
             if len(translated):
                 translated.delete_page(0)
-            translated.insert_pdf(original, from_page=number-1, to_page=number-1)
+            translated.insert_pdf(visual, from_page=number-1, to_page=number-1)
             page = translated[0]
             source_fonts={font[0] for font in page.get_fonts(full=True)}
             entries = [x for x in placements if x.page == number]
@@ -1073,7 +1148,7 @@ def render(source: Path, destination: Path, placements: list[Placement], selecte
             if native:
                 # Native edits never touch image pixels or vector strokes.
                 page.apply_redactions(images=0, graphics=0, text=0)
-                clear_native_bitmap_replicas(original[number-1],page,native)
+                clear_native_bitmap_replicas(visual[number-1],page,native)
             for entry in entries:
                 for decoration in entry.decorations or []:
                     page.draw_rect(fitz.Rect(decoration['bbox']),color=None,fill=decoration['background'],overlay=True)

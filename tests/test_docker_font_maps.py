@@ -61,6 +61,9 @@ def test_full_pinned_font_digits_ascii_cjk_bold_subset_roundtrip(tmp_path):
         assert font['GSUB'].table.LookupList.Lookup[10].SubTable[0].mapping == {'ellipsis': original_gsub['ellipsis']}
         cmap = font.getBestCmap()
         assert len({cmap[code] for code in (0x2D, 0xAD, 0x2011)}) == 3
+        assert cmap[0x2026] != cmap[0x22EF]
+        assert glyf[cmap[0x2026]].compile(glyf) == glyf[cmap[0x22EF]].compile(glyf)
+        assert font['hmtx'].metrics[cmap[0x2026]] == font['hmtx'].metrics[cmap[0x22EF]]
         for code in (0xAD, 0x2011):
             assert glyf[cmap[code]].compile(glyf) == glyf[cmap[0x2D]].compile(glyf)
             assert font['hmtx'].metrics[cmap[code]] == font['hmtx'].metrics[cmap[0x2D]]

@@ -6,7 +6,7 @@ The SlideTwin license does not replace or relicense those components.
 
 ## PyMuPDF / MuPDF
 
-SlideTwin uses PyMuPDF 1.28.2 and its MuPDF engine under their GNU Affero General
+SlideTwin uses PyMuPDF 2.0 and its MuPDF engine under their GNU Affero General
 Public License v3 terms. Artifex also offers a separate commercial license;
 SlideTwin does not include such a commercial grant.
 
@@ -28,7 +28,7 @@ The Docker build downloads Noto Sans SC from Google Fonts at commit
 `a85815a42757630ce188fdad368c2dfc444d4773`, verifies SHA-256 digests, instantiates
 regular and bold static fonts, and removes duplicate compatibility-character
 aliases from Unicode mappings. It also disables ten unmapped ASCII-digit
-localization substitutions and duplicates identical hyphen outlines for unique
+localization substitutions and duplicates identical hyphen and ellipsis outlines for unique
 Unicode alias maps, preserving the other shaping features. These modified font files remain under the
 SIL Open Font License 1.1, with upstream copyright notices retained.
 

@@ -170,6 +170,7 @@ def test_inline_subscript_image_reserves_adjacent_cjk_descender_space(tmp_path,s
         p=pdf.new_page();spare,scale=p.insert_htmlbox(frame,content_html('',size,0,True,'left',1.12,body),css=css,archive=archive,scale_low=.75)
         assert spare>=0 and scale>=.75
         assert all(fitz.Rect(w[:4]) in frame+(-.75,-.75,.75,.75) for w in p.get_text('words'))
+        assert all(fitz.Rect(im['bbox']) in frame+(-.75,-.75,.75,.75) for im in p.get_image_info())
 
 
 def test_cell_reading_order_keeps_subscripts_with_their_own_baseline():

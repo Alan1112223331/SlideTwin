@@ -13,6 +13,7 @@ import pymupdf as fitz
 
 from .models import digest, write_json
 from .render import Placement
+from .geometry import normalize_page_rotation, configure_text_geometry
 
 
 QA_KINDS = {
@@ -144,6 +145,7 @@ def edge_rounding_pixel_count(left: np.ndarray, right: np.ndarray) -> int | None
 
 def verify(source: Path, output: Path, selected: list[int], placements: list[Placement], work: Path,
            bilingual=True, *, phase="final") -> dict:
+    configure_text_geometry()
     failures, page_reports = [], []
     indices = page_indices(selected, bilingual)
     with fitz.open(source) as src, fitz.open(output) as result:
@@ -191,6 +193,9 @@ def verify(source: Path, output: Path, selected: list[int], placements: list[Pla
                 changed = int(outside.sum())
                 if changed > 6:
                     failures.append({"page": number, "kind": "graphics_outside_edit_regions_changed", "pixels": changed})
+                # Pixel comparison is in displayed coordinates. Match text
+                # checks to those coordinates even for untouched rotated pages.
+                normalize_page_rotation(target)
                 for entry in page_entries:
                     if failure := text_layer_check(target, entry):
                         failures.append(failure)

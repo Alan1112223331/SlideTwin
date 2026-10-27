@@ -32,25 +32,26 @@ def repair_font_maps(font):
                 canonical = unicodedata.normalize('NFKC', chr(code))
                 if len(canonical) == 1 and ord(canonical) != code and table.cmap.get(ord(canonical)) == glyph:
                     del table.cmap[code]
-    # ASCII hyphen, soft hyphen, and nonbreaking hyphen share one glyph in
-    # this font. Preserve every character and its outline, but give aliases
-    # independent glyph IDs so PDF reverse maps cannot turn '-' into U+2011.
+    # Hyphen variants and the punctuation/mathematical ellipses share glyphs.
+    # Give each alias its own identical outline so PDF reverse maps cannot
+    # change '-' to U+2011 or punctuation U+2026 to mathematical U+22EF.
     if 'glyf' in font and 'hmtx' in font:
         best = font.getBestCmap()
-        hyphen = best.get(0x2D)
-        for code in (0xAD, 0x2011):
-            if hyphen and best.get(code) == hyphen:
-                alias = f'{hyphen}.unicode{code:04X}'
-                if alias not in font.getGlyphOrder():
-                    font['glyf'][alias] = copy.deepcopy(font['glyf'][hyphen])
-                    font['hmtx'].metrics[alias] = font['hmtx'].metrics[hyphen]
-                    if 'vmtx' in font:
-                        font['vmtx'].metrics[alias] = font['vmtx'].metrics[hyphen]
-                    order = font.getGlyphOrder()
-                    font.setGlyphOrder(order if alias in order else [*order, alias])
-                for table in unicode_maps:
-                    if table.cmap.get(code) == hyphen:
-                        table.cmap[code] = alias
+        for canonical, codes in [(0x2D, (0xAD, 0x2011)), (0x2026, (0x22EF,))]:
+            glyph = best.get(canonical)
+            for code in codes:
+                if glyph and best.get(code) == glyph:
+                    alias = f'{glyph}.unicode{code:04X}'
+                    if alias not in font.getGlyphOrder():
+                        font['glyf'][alias] = copy.deepcopy(font['glyf'][glyph])
+                        font['hmtx'].metrics[alias] = font['hmtx'].metrics[glyph]
+                        if 'vmtx' in font:
+                            font['vmtx'].metrics[alias] = font['vmtx'].metrics[glyph]
+                        order = font.getGlyphOrder()
+                        font.setGlyphOrder(order if alias in order else [*order, alias])
+                    for table in unicode_maps:
+                        if table.cmap.get(code) == glyph:
+                            table.cmap[code] = alias
     reverse = {}
     for table in unicode_maps:
         for code, glyph in table.cmap.items():
@@ -87,7 +88,7 @@ def validate_font_roundtrip(fonts):
         '逻辑电路 锁存器 利用上下文 Q1 Q2 Q3 EE6316 0123456789 日期26Nov2026',
         ''.join(chr(code) for code in range(33, 127)),
         'Q0 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q8 Q9 26Nov2026 1.25 3/4',
-        '目标：10⁶ TFLOP/s；𝑥 ∈ ℝⁿ',
+        '目标：10⁶ TFLOP/s；𝑥 ∈ ℝⁿ；中文省略……；数学⋯',
     ]
     expected = []
     with fitz.open() as pdf:

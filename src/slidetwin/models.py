@@ -79,7 +79,7 @@ class Document:
     source_sha256: str
     pages: list[Page]
     diagnostics: list[dict] = field(default_factory=list)
-    schema_version: int = 1
+    schema_version: int = 2  # Geometry uses the displayed page, independent of /Rotate.
 
     def save(self, path: Path):
         write_json(path, asdict(self))
@@ -87,5 +87,6 @@ class Document:
     @classmethod
     def load(cls, path: Path) -> Document:
         obj = json.loads(path.read_text(encoding="utf-8"))
+        obj.setdefault("schema_version", 1)
         obj["pages"] = [Page(**{**p, "regions": [Region(**r) for r in p["regions"]]}) for p in obj["pages"]]
         return cls(**obj)

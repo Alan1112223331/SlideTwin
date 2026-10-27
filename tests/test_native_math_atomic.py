@@ -9,8 +9,19 @@ from PIL import Image
 from slidetwin.config import Layout
 from slidetwin.extract import native_lines
 from slidetwin.models import Document, Page, Region, digest
+from slidetwin.qa import compact
 from slidetwin.render import (build_plan, content_html, css_fonts,
-                              native_parenthesized_asset_box)
+                              native_parenthesized_asset_box, original_asset_tokens)
+
+
+def test_copied_asset_label_keeps_glyphs_when_nonprinting_pdf_codes_are_omitted():
+    region = Region('r', 1, 'Input ⟦P000⟧ and ⟦P001⟧', [0, 0, 100, 20],
+                    protected={'⟦P000⟧': '\x01@AB', '⟦P001⟧': '\x07@A0'},
+                    protected_assets={'⟦P000⟧': {'text': '\x01@AB'},
+                                      '⟦P001⟧': {'text': '\x07@A0'}})
+    assert original_asset_tokens(region, '输入 @AB > @A0，重复 @AB') == '输入 ⟦P000⟧ > ⟦P001⟧，重复 ⟦P000⟧'
+    assert original_asset_tokens(region, '输入 @AC，保持原样') == '输入 @AC，保持原样'
+    assert original_asset_tokens(region, '输入 ⟦P000⟧') == '输入 ⟦P000⟧'
 
 
 def original_inline_math(tmp_path):
@@ -75,7 +86,10 @@ def test_two_native_math_assets_and_brackets_remain_atomic_in_narrow_pdf(tmp_pat
         assert len(result.get_image_info())==1
         assert len(result.get_text('dict')['blocks'])>1
         assert '(' not in result.get_text() and '）' not in result.get_text()
-        assert all(word in result.get_text() for word in ['Translated','prefix','translated','suffix'])
+        # Noto shapes fi/ffi into Unicode presentation ligatures on Linux.
+        # Use the same narrow typography expansion as production text QA.
+        text = compact(result.get_text())
+        assert all(word in text for word in ['Translated','prefix','translated','suffix']), text
         image_box=fitz.Rect(result.get_image_info()[0]['bbox'])
         assert image_box.width==pytest.approx(expected_box.width,abs=.03)
         assert image_box.height==pytest.approx(expected_box.height,abs=.03)
